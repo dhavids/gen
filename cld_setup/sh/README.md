@@ -2,7 +2,7 @@
 
 Scripts to self-host a [Tailscale DERP relay](https://tailscale.com/kb/1118/custom-derp-servers) and expose a local web app (e.g. [Apache Guacamole](https://guacamole.apache.org/)) over a plain outbound SSH tunnel — both sharing port 443 on a single cheap VPS via [Caddy](https://caddyserver.com/) + the [`layer4`](https://github.com/mholt/caddy-l4) plugin for SNI-based TCP passthrough.
 
-Built out of necessity after a university network's firewall silently reset all outbound TCP/443 traffic to a specific cloud IP (confirmed via abuse-history lookup — a recycled IP from a prior tenant). The scripts and notes here reflect what actually worked, including the dead ends.
+The scripts and notes here reflect what actually worked, including the dead ends.
 
 ## Why this exists
 
@@ -11,8 +11,8 @@ Built out of necessity after a university network's firewall silently reset all 
 
 ## What's in this repo
 
-- `vps-setup.sh` — run on a fresh Ubuntu 24.04 VPS. Installs and configures derper, builds Caddy with the `layer4` plugin, gets Let's Encrypt certs via certbot standalone, wires up systemd services and a cert-renewal hook.
-- `client-tunnel-setup.sh` — run on the machine hosting the local service you want to expose (e.g. wherever Guacamole runs). Sets up a persistent `autossh` reverse tunnel to the VPS.
+- `server.sh` — run on a fresh Ubuntu 24.04 VPS. Installs and configures derper, builds Caddy with the `layer4` plugin, gets Let's Encrypt certs via certbot standalone, wires up systemd services and a cert-renewal hook.
+- `client.sh` — run on the machine hosting the local service you want to expose (e.g. wherever Guacamole runs). Sets up a persistent `autossh` reverse tunnel to the VPS.
 - `SETUP-GUIDE.md` — full walkthrough, including the specific gotchas hit along the way (see below).
 
 ## Quick start
@@ -36,10 +36,8 @@ sudo DOMAIN=example.com \
 VPS_HOST=203.0.113.10 \
 VPS_USER=tunnel \
 GUAC_LOCAL_PORT=8080 \
-bash client-tunnel-setup.sh
+bash client.sh
 ```
-
-See `SETUP-GUIDE.md` for the full breakdown, env var reference, and troubleshooting notes.
 
 ## Gotchas this repo already solves for you
 
@@ -50,7 +48,7 @@ See `SETUP-GUIDE.md` for the full breakdown, env var reference, and troubleshoot
 
 ## A note on IP reputation
 
-If a self-hosted relay/tunnel mysteriously gets its TCP connections reset immediately after the TLS ClientHello — while completely unrelated HTTPS sites work fine from the same network — check the VPS's IP on [AbuseIPDB](https://www.abuseipdb.com) before assuming it's a protocol/DPI issue. Cloud provider IPs get recycled between customers, and a prior tenant's abuse history can get an IP flagged in commercial threat-intel feeds that institutional firewalls subscribe to. A fresh IP (new droplet, possibly new provider) often resolves this outright — test cheaply before rebuilding the whole stack (see `SETUP-GUIDE.md` for a minimal reachability test using a throwaway `openssl s_server` listener).
+Not all IPs are transversable by all networks. Check which works for you first.
 
 ## License
 

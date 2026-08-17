@@ -30,18 +30,18 @@ Both scripts do as much as possible automatically, but a few things fundamentall
 
 | Step | Automatable? |
 |---|---|
-| VPS hardening, user setup, firewall | ✅ Scripted |
-| Disabling SSH root login + password auth | ❌ Manual, prompted — risky to fully automate (lockout risk if misconfigured) |
-| Installing derper + getting its cert | ✅ Scripted |
-| Installing cloudflared | ✅ Scripted |
-| Creating a Cloudflare account & adding your domain | ❌ Manual — browser, your account |
-| Changing your domain's nameservers to Cloudflare's | ❌ Manual — your registrar's dashboard |
-| `cloudflared tunnel login` (authorizing the VPS) | ❌ Manual — opens a URL, needs a browser click |
-| Creating the tunnel, writing its config, routing DNS | ✅ Scripted (once login above is done) |
-| systemd services + cert renewal hook | ✅ Scripted |
-| Adding the custom DERP region to your Tailscale ACL | ❌ Manual — Tailscale's web console |
-| Authorizing the client's SSH key on the VPS (first time) | ❌ Manual — needs the VPS account's password once |
-| Setting up the client's reverse tunnel | ✅ Scripted (after the key is authorized) |
+| VPS hardening, user setup, firewall | Scripted |
+| Disabling SSH root login + password auth | Manual, prompted — risky to fully automate (lockout risk if misconfigured) |
+| Installing derper + getting its cert | Scripted |
+| Installing cloudflared | Scripted |
+| Creating a Cloudflare account & adding your domain | Manual — browser, your account |
+| Changing your domain's nameservers to Cloudflare's | Manual — your registrar's dashboard |
+| `cloudflared tunnel login` (authorizing the VPS) | Manual — opens a URL, needs a browser click |
+| Creating the tunnel, writing its config, routing DNS | Scripted (once login above is done) |
+| systemd services + cert renewal hook | Scripted |
+| Adding the custom DERP region to your Tailscale ACL | Manual — Tailscale's web console |
+| Authorizing the client's SSH key on the VPS (first time) | Manual — needs the VPS account's password once |
+| Setting up the client's reverse tunnel | Scripted (after the key is authorized) |
 
 ## Quick start
 

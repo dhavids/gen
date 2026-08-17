@@ -250,7 +250,12 @@ manual_step "Cloudflare account and domain setup" \
   "2. Add your domain ($DOMAIN) as a site in Cloudflare" \
   "3. Cloudflare will show you two nameservers (e.g. xxx.ns.cloudflare.com)" \
   "4. Go to your domain registrar and change the domain's nameservers to those two" \
-  "5. Wait for Cloudflare's dashboard to show the zone as 'Active' (can take a while to propagate)"
+  "5. Wait for Cloudflare's dashboard to show the zone as 'Active' (can take a while to propagate)" \
+  "6. IMPORTANT: go to Speed -> Settings and turn OFF 'HTTP/3 (with QUIC)' for this zone." \
+  "   Without this, WebSocket connections (e.g. Guacamole) can fail or drop randomly on" \
+  "   networks where QUIC/UDP is unreliable, even though the tunnel itself is fine —" \
+  "   the browser negotiates HTTP/3 with Cloudflare's edge independently of anything" \
+  "   cloudflared does, so this has to be turned off at the zone level, not in config.yml."
 
 }
 
@@ -304,19 +309,65 @@ dpkg-reconfigure -f noninteractive unattended-upgrades || true
 
 step_ssh_harden() {
 
-manual_step "Harden SSH (disable root login + password auth)" \
-  "This is a MANUAL step on purpose: doing it wrong (e.g. a mistyped key)" \
-  "can lock you out with no way back in except your provider's console." \
-  "" \
-  "1. Edit /etc/ssh/sshd_config and set:" \
-  "     PermitRootLogin no" \
-  "     PasswordAuthentication no" \
-  "     PubkeyAuthentication yes" \
-  "2. Restart SSH:  sudo systemctl restart ssh" \
-  "3. BEFORE closing this session, open a SECOND terminal and confirm you" \
-  "   can still log in as $TUNNEL_USER with your key:" \
-  "     ssh $TUNNEL_USER@<this-vps-ip>" \
-  "   Only proceed once that second login works."
+echo "=== SSH Hardening ==="
+echo ""
+echo "About to edit /etc/ssh/sshd_config to set:"
+echo "  PermitRootLogin no"
+echo "  PasswordAuthentication no"
+echo "  PubkeyAuthentication yes"
+echo ""
+echo "A timestamped backup of the current file will be kept first."
+read -rp "Proceed with this edit? [y/N] " confirm_edit
+if [[ ! "$confirm_edit" =~ ^[Yy]$ ]]; then
+  echo "Skipped SSH hardening — no changes made."
+  return
+fi
+
+cp /etc/ssh/sshd_config "/etc/ssh/sshd_config.bak.$(date +%s)"
+
+for pair in "PermitRootLogin:no" "PasswordAuthentication:no" "PubkeyAuthentication:yes"; do
+  key="${pair%%:*}"
+  val="${pair##*:}"
+  if grep -qE "^[[:space:]]*#?[[:space:]]*${key}[[:space:]]+" /etc/ssh/sshd_config; then
+    sed -i -E "s|^[[:space:]]*#?[[:space:]]*${key}[[:space:]]+.*|${key} ${val}|" /etc/ssh/sshd_config
+  else
+    echo "${key} ${val}" >> /etc/ssh/sshd_config
+  fi
+done
+
+echo ""
+echo "Edited /etc/ssh/sshd_config. Current relevant lines:"
+grep -E "^(PermitRootLogin|PasswordAuthentication|PubkeyAuthentication)" /etc/ssh/sshd_config
+echo ""
+
+read -rp "Restart SSH now to apply these changes? [y/N] " confirm_restart
+if [[ ! "$confirm_restart" =~ ^[Yy]$ ]]; then
+  echo "NOTE: changes are written to sshd_config but NOT active yet (SSH not restarted)."
+  return
+fi
+
+systemctl restart ssh
+echo "SSH restarted."
+echo ""
+
+echo "Attempting an automated local login check as $TUNNEL_USER (best-effort)..."
+if ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "$TUNNEL_USER@localhost" "echo ok" &>/dev/null; then
+  echo "Automated check succeeded: $TUNNEL_USER can log in with a key over SSH."
+else
+  echo "NOTE: automated local check didn't succeed — this can be normal (e.g. no agent"
+  echo "      forwarding set up on this box) and isn't necessarily a problem. The manual"
+  echo "      check below is the one that actually matters."
+fi
+
+echo ""
+echo "=========================================================================="
+echo "  BEFORE CONTINUING: open a SECOND terminal now (don't close this one) and"
+echo "  confirm you can still log in as $TUNNEL_USER with your key:"
+echo "      ssh $TUNNEL_USER@<this-vps-ip>"
+echo "  Only continue once that second login works."
+echo "=========================================================================="
+read -rp "Press Enter once you've confirmed a second login works... "
+echo ""
 
 }
 

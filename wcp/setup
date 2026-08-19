@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# setup — installs wcp to the right place depending on the detected OS.
+#
+# On Linux/macOS (including WSL): installs the bash `wcp` script to
+# /usr/local/bin/wcp (or ~/.local/bin/wcp if that's not writable/doesn't
+# exist), and makes it executable.
+#
+# On native Windows (running this via Git Bash, MSYS2, or similar): installs
+# both wcp.ps1 and a wcp.cmd launcher (so plain `wcp` works from cmd.exe,
+# PowerShell, or a Git Bash prompt) into %USERPROFILE%\bin, and adds that
+# folder to the user's PATH if it isn't already there.
+#
+# USAGE:
+#   bash setup
+#
+# (If you're on native Windows with no bash available at all, see the
+# "Manual Windows install" section in README.md instead — this script needs
+# some kind of shell to run, which Git Bash/WSL/MSYS2 all provide.)
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+detect_os() {
+    case "$(uname -s)" in
+        Linux*)
+            if grep -qi microsoft /proc/version 2>/dev/null; then
+                echo "wsl"
+            else
+                echo "linux"
+            fi
+            ;;
+        Darwin*) echo "macos" ;;
+        CYGWIN*|MINGW*|MSYS*) echo "windows" ;;
+        *) echo "unknown" ;;
+    esac
+}
+
+OS="$(detect_os)"
+echo "Detected: $OS"
+echo ""
+
+install_unix() {
+    local target=""
+    if [ -w /usr/local/bin ] || [ "$(id -u)" = "0" ]; then
+        target="/usr/local/bin/wcp"
+    else
+        mkdir -p "$HOME/.local/bin"
+        target="$HOME/.local/bin/wcp"
+    fi
+
+    cp "$SCRIPT_DIR/wcp" "$target"
+    chmod +x "$target"
+    echo "Installed: $target"
+
+    case ":$PATH:" in
+        *":$(dirname "$target"):"*)
+            echo "$(dirname "$target") is already in your PATH — you can run 'wcp' directly."
+            ;;
+        *)
+            echo ""
+            echo "NOTE: $(dirname "$target") is not in your PATH yet."
+            echo "Add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
+            echo "  export PATH=\"\$PATH:$(dirname "$target")\""
+            ;;
+    esac
+}
+
+install_windows() {
+    # Convert a Unix-style path (as seen from Git Bash/MSYS2) to a native
+    # Windows path for the parts we hand to cmd.exe/PowerShell.
+    local win_home
+    win_home="$(cd "$HOME" && pwd -W 2>/dev/null || echo "$HOME")"
+    local bin_dir="$HOME/bin"
+    mkdir -p "$bin_dir"
+
+    cp "$SCRIPT_DIR/wcp.ps1" "$bin_dir/wcp.ps1"
+
+    cat > "$bin_dir/wcp.cmd" << 'EOF'
+@echo off
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wcp.ps1" %*
+EOF
+
+    echo "Installed: $bin_dir/wcp.ps1"
+    echo "Installed: $bin_dir/wcp.cmd  (lets you just type 'wcp' from cmd.exe or PowerShell)"
+    echo ""
+
+    # Add to the Windows user PATH via PowerShell, if powershell.exe is reachable.
+    if command -v powershell.exe &>/dev/null; then
+        local win_bin_dir
+        win_bin_dir="$(cd "$bin_dir" && pwd -W 2>/dev/null || echo "$bin_dir")"
+        powershell.exe -NoProfile -Command "
+            \$dir = '$win_bin_dir';
+            \$current = [Environment]::GetEnvironmentVariable('Path', 'User');
+            if (\$current -notlike \"*\$dir*\") {
+                [Environment]::SetEnvironmentVariable('Path', \"\$current;\$dir\", 'User');
+                Write-Output 'Added to User PATH — restart your terminal for it to take effect.';
+            } else {
+                Write-Output 'Already in PATH.';
+            }
+        "
+    else
+        echo "NOTE: couldn't find powershell.exe to update PATH automatically."
+        echo "Add this folder to your Windows PATH manually: $bin_dir"
+    fi
+}
+
+case "$OS" in
+    linux|macos|wsl)
+        install_unix
+        ;;
+    windows)
+        install_windows
+        ;;
+    *)
+        echo "Unrecognized OS — install manually:"
+        echo "  Unix-like: copy 'wcp' to somewhere in your PATH, chmod +x it."
+        echo "  Windows:   copy 'wcp.ps1' somewhere in your PATH (see README.md)."
+        exit 1
+        ;;
+esac
+
+echo ""
+echo "Done. Test with:"
+echo "  wcp hello world"

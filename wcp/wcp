@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+# wcp — minimal upload wrapper with a compact roundtrip code.
+#
+# USAGE:
+#   wcp path/to/file.txt        # upload -> prints a short code, e.g. "aAbCd.txt"
+#   wcp some words here         # not a file -> uploaded as text, prints a code
+#   echo "text" | wcp           # no args -> reads stdin, prints a code
+#   wcp aAbCd.txt                # retrieve: decodes backend + id from the code
+#                                #   text  -> printed to stdout
+#                                #   file  -> saved in the current folder with
+#                                #            its original filename
+#   wcp get <full-url> [-o file] # retrieve by a full URL instead of a code
+#
+# The first character of the printed code is the backend letter; everything
+# after it is that backend's own ID for the upload:
+#   a = 0x0          (default fetch host https://0x0.st)
+#   b = transfer.sh  (default fetch host https://transfer.sh)
+#   c = catbox       (default fetch host https://files.catbox.moe — note this
+#                     differs from catbox's upload endpoint, catbox.moe)
+#
+# --backend / --host work for both directions: on upload they choose/override
+# which service and endpoint is used; on retrieval, --host overrides the
+# default fetch host for the decoded backend letter (useful if you uploaded
+# via a self-hosted instance and need to fetch from that same instance).
+#
+# Collision handling: a single word that happens to start with a known
+# backend letter (e.g. `wcp aeroplane`) looks like a code. wcp tries
+# retrieval first; if that 404s, it falls back to uploading the word as text.
+set -euo pipefail
+
+DEFAULT_UPLOAD_HOST_0X0="https://0x0.st"
+DEFAULT_UPLOAD_HOST_TRANSFERSH="https://transfer.sh"
+DEFAULT_UPLOAD_HOST_CATBOX="https://catbox.moe/user/api.php"
+DEFAULT_FETCH_HOST_0X0="https://0x0.st"
+DEFAULT_FETCH_HOST_TRANSFERSH="https://transfer.sh"
+DEFAULT_FETCH_HOST_CATBOX="https://files.catbox.moe"
+
+letter_for_backend() {
+  case "$1" in
+    0x0) echo "a" ;;
+    transfer.sh) echo "b" ;;
+    catbox) echo "c" ;;
+  esac
+}
+
+default_fetch_host_for_letter() {
+  case "$1" in
+    a) echo "$DEFAULT_FETCH_HOST_0X0" ;;
+    b) echo "$DEFAULT_FETCH_HOST_TRANSFERSH" ;;
+    c) echo "$DEFAULT_FETCH_HOST_CATBOX" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Strip "scheme://host" off a URL, leaving just the path (the "id"),
+# regardless of which host actually issued it. Works for all three
+# backends' real response shapes, including catbox's cross-domain quirk.
+strip_host() {
+  local url="$1"
+  url="${url#https://}"
+  url="${url#http://}"
+  url="${url#*/}"
+  echo "$url"
+}
+
+# --- retrieval: given a full URL, print (text) or save (file) --------------
+retrieve_url() {
+  local url="$1"
+  local override_out="${2:-}"
+  local hdrfile bodyfile ctype http_code
+  hdrfile="$(mktemp)"
+  bodyfile="$(mktemp)"
+  http_code="$(curl -sSL -D "$hdrfile" -o "$bodyfile" -w '%{http_code}' "$url")"
+
+  if [[ "$http_code" -ge 400 ]]; then
+    rm -f "$hdrfile" "$bodyfile"
+    return 1
+  fi
+
+  ctype="$(grep -i '^content-type:' "$hdrfile" | tail -1 | cut -d: -f2- | tr -d '\r' | xargs || true)"
+
+  if [[ -n "$override_out" ]]; then
+    mv "$bodyfile" "$override_out"
+    echo "Saved to $override_out"
+  elif [[ "$ctype" == text/* ]]; then
+    cat "$bodyfile"
+    rm -f "$bodyfile"
+  else
+    local fname
+    fname="$(basename "$url")"
+    [[ -z "$fname" || "$fname" == "/" ]] && fname="downloaded_file"
+    mv "$bodyfile" "./$fname"
+    echo "Saved as $fname"
+  fi
+  rm -f "$hdrfile"
+  return 0
+}
+
+# --- "get" subcommand: fetch back a URL directly ----------------------------
+if [[ "${1:-}" == "get" ]]; then
+  shift
+  OUTFILE=""
+  URL=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -o|--output) OUTFILE="$2"; shift 2 ;;
+      *) URL="$1"; shift ;;
+    esac
+  done
+  if [[ -z "$URL" ]]; then
+    echo "Usage: wcp get <url> [-o outputfile]" >&2
+    exit 1
+  fi
+  if ! retrieve_url "$URL" "$OUTFILE"; then
+    echo "Failed to fetch $URL" >&2
+    exit 1
+  fi
+  exit 0
+fi
+
+# --- parse flags once, for both upload and retrieval paths ------------------
+BACKEND="0x0"
+HOST=""
+COPY=0
+ARGS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --backend)
+      BACKEND="$2"
+      shift 2
+      ;;
+    --backend=*)
+      BACKEND="${1#*=}"
+      shift
+      ;;
+    --host)
+      HOST="$2"
+      shift 2
+      ;;
+    --host=*)
+      HOST="${1#*=}"
+      shift
+      ;;
+    --copy)
+      COPY=1
+      shift
+      ;;
+    --)
+      shift
+      ARGS+=("$@")
+      break
+      ;;
+    *)
+      ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+# --- short-code retrieval: single token starting with a known backend ------
+# letter, at least 2 characters, and not an existing local file. Tries the
+# retrieval first; if it 404s (or any error), falls through to uploading the
+# original word as text instead (see collision note in the header comment).
+if [[ ${#ARGS[@]} -eq 1 && ! -f "${ARGS[0]}" ]]; then
+  CANDIDATE="${ARGS[0]}"
+  LETTER="${CANDIDATE:0:1}"
+  ID="${CANDIDATE:1}"
+  if [[ -n "$ID" ]]; then
+    if [[ -n "$HOST" ]]; then
+      FETCH_HOST="$HOST"
+      VALID_LETTER=1
+    else
+      FETCH_HOST="$(default_fetch_host_for_letter "$LETTER" 2>/dev/null)" && VALID_LETTER=1 || VALID_LETTER=0
+    fi
+    if [[ "${VALID_LETTER:-0}" -eq 1 ]]; then
+      if retrieve_url "${FETCH_HOST%/}/${ID}"; then
+        exit 0
+      fi
+      # else: fall through to normal upload handling below, treating
+      # ARGS[0] as text to upload.
+    fi
+  fi
+fi
+
+case "$BACKEND" in
+  0x0)         DEFAULT_HOST="$DEFAULT_UPLOAD_HOST_0X0" ;;
+  transfer.sh) DEFAULT_HOST="$DEFAULT_UPLOAD_HOST_TRANSFERSH" ;;
+  catbox)      DEFAULT_HOST="$DEFAULT_UPLOAD_HOST_CATBOX" ;;
+  *)
+    echo "Unknown backend: $BACKEND (expected: 0x0, transfer.sh, catbox)" >&2
+    exit 1
+    ;;
+esac
+[[ -z "$HOST" ]] && HOST="$DEFAULT_HOST"
+HOST="${HOST%/}"
+
+do_copy() {
+  local text="$1"
+  if command -v pbcopy &>/dev/null; then
+    printf '%s' "$text" | pbcopy
+  elif command -v xclip &>/dev/null; then
+    printf '%s' "$text" | xclip -selection clipboard
+  elif command -v wl-copy &>/dev/null; then
+    printf '%s' "$text" | wl-copy
+  fi
+}
+
+# --- backend: 0x0 (POST /, multipart "file" field) --------------------------
+up_0x0_file()  { curl -sS -F "file=@${1}" "$HOST"; }
+up_0x0_text()  { printf '%s' "$1" | curl -sS -F "file=@-" "$HOST"; }
+up_0x0_stdin() { curl -sS -F "file=@-" "$HOST"; }
+
+# --- backend: transfer.sh (PUT, filename in the URL path) -------------------
+up_transfersh_file()  { curl -sS -T "$1" "$HOST/$(basename "$1")"; }
+up_transfersh_text()  { printf '%s' "$1" | curl -sS -T - "$HOST/paste.txt"; }
+up_transfersh_stdin() { curl -sS -T - "$HOST/paste.txt"; }
+
+# --- backend: catbox (POST, multipart reqtype=fileupload) -------------------
+up_catbox_file()  { curl -sS -F "reqtype=fileupload" -F "fileToUpload=@${1}" "$HOST"; }
+up_catbox_text() {
+  local tmp
+  tmp="$(mktemp /tmp/wcp-paste.XXXXXX.txt)"
+  printf '%s' "$1" > "$tmp"
+  curl -sS -F "reqtype=fileupload" -F "fileToUpload=@${tmp}" "$HOST"
+  rm -f "$tmp"
+}
+up_catbox_stdin() {
+  local tmp
+  tmp="$(mktemp /tmp/wcp-paste.XXXXXX.txt)"
+  cat > "$tmp"
+  curl -sS -F "reqtype=fileupload" -F "fileToUpload=@${tmp}" "$HOST"
+  rm -f "$tmp"
+}
+
+dispatch() {
+  local kind="$1" # file | text | stdin
+  local arg="${2:-}"
+  case "$BACKEND" in
+    0x0)
+      case "$kind" in
+        file)  up_0x0_file "$arg" ;;
+        text)  up_0x0_text "$arg" ;;
+        stdin) up_0x0_stdin ;;
+      esac
+      ;;
+    transfer.sh)
+      case "$kind" in
+        file)  up_transfersh_file "$arg" ;;
+        text)  up_transfersh_text "$arg" ;;
+        stdin) up_transfersh_stdin ;;
+      esac
+      ;;
+    catbox)
+      case "$kind" in
+        file)  up_catbox_file "$arg" ;;
+        text)  up_catbox_text "$arg" ;;
+        stdin) up_catbox_stdin ;;
+      esac
+      ;;
+  esac
+}
+
+if [[ ${#ARGS[@]} -eq 0 || ( ${#ARGS[@]} -eq 1 && "${ARGS[0]}" == "-" ) ]]; then
+  RESULT="$(dispatch stdin)"
+elif [[ ${#ARGS[@]} -eq 1 && -f "${ARGS[0]}" ]]; then
+  RESULT="$(dispatch file "${ARGS[0]}")"
+else
+  TEXT="${ARGS[*]}"
+  RESULT="$(dispatch text "$TEXT")"
+fi
+
+LETTER="$(letter_for_backend "$BACKEND")"
+ID="$(strip_host "$RESULT")"
+CODE="${LETTER}${ID}"
+
+echo "$CODE"
+[[ $COPY -eq 1 ]] && do_copy "$CODE"

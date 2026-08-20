@@ -34,10 +34,9 @@
 # escape-path codes carry a dot, encrypted codes a dash), so an ordinary long
 # word is uploaded straight away with no wasted request.
 #
-# Encryption is NOT implemented in this PowerShell version. litterbox (the
-# default backend) is plain, so normal use works. Targeting catbox, passing -e,
-# or retrieving a code containing a - all error out; use --plain / -p for
-# catbox. Short aliases: -b backend, -c copy, -p plain, -t time.
+# Encryption is NOT implemented in this PowerShell version. Uploads require
+# --plain / -p (or WCP_PLAIN=1) since encryption is on by default. Retrieving
+# a code containing a - errors out. Short aliases: -b backend, -c copy, -p plain, -t time.
 #
 # Requires curl.exe (bundled with Windows 10+ by default).
 
@@ -349,9 +348,8 @@ Options:
   -v, --paste            upload the clipboard contents (takes no arguments)
   -h, --help             show this help
 
-Encryption is NOT implemented in this PowerShell version. litterbox (the
-default) is plain, so normal use works. Targeting catbox, passing -e, or
-retrieving a code containing a - all error out; use --plain for catbox.
+Encryption is NOT implemented in this PowerShell version. All uploads require
+--plain (-p) or WCP_PLAIN=1 since encryption is on by default.
 
 Env: WCP_BACKEND, WCP_TIME (whole hours), WCP_PLAIN=1
 "@
@@ -673,15 +671,11 @@ $Encrypt = $false
 if ($Plain) {
     $Encrypt = $false
 } elseif ($ForceEncrypt) {
-    Assert-OpenSsl
-    $Encrypt = $true
-} elseif ($Backend -eq "litterbox") {
-    $Encrypt = $false
-} elseif ($OpenSslPath) {
-    $Encrypt = $true
+    Write-Error "wcp: encryption is on by default and is not yet supported in the PowerShell version — use --plain"
+    exit 1
 } else {
-    Write-Error "wcp: openssl not found - uploading to $Backend UNENCRYPTED"
-    Write-Error "wcp: install openssl, or pass --plain (-p) to silence this"
+    Write-Error "wcp: encryption is on by default and is not yet supported in the PowerShell version — use --plain"
+    exit 1
 }
 
 $key = $null

@@ -47,11 +47,10 @@ if ($sslCmd) {
     }
 }
 
-if ($sslPath -and -not $sslCmd) {
-    Write-Output ('Found openssl at ' + $sslPath + ' (not on PATH).')
-    Write-Output 'wcp will use it directly. Encryption is available.'
+if ($sslPath) {
+    Write-Output 'Found openssl, encryption is available.'
     Write-Output ''
-} elseif (-not $sslPath) {
+} else {
     Write-Output 'NOTE: openssl was not found.'
     Write-Output '      wcp works without it, but -e and catbox uploads need it.'
     Write-Output '      Install with one of:'
@@ -79,7 +78,7 @@ $cmdLines = @(
     'powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wcp.ps1" %*'
 )
 Set-Content -LiteralPath $dstCmd -Value $cmdLines -Encoding ASCII
-Write-Output ('Installed: ' + $dstCmd + '  (lets you just type wcp)')
+Write-Output ('Installed: ' + $dstCmd)
 Write-Output ''
 
 # Read the User-scoped PATH, not the combined $env:Path.
@@ -121,13 +120,11 @@ $undo2 = $undoFilter + $binDir + ''' }) -join '';'''
 $undo3 = '  [Environment]::SetEnvironmentVariable(''Path'', $p, ''User'')'
 
 if ($already) {
-    Write-Output ($binDir + ' is already in your user PATH.')
-    if ($inSession) {
-        Write-Output 'You can run wcp directly.'
-    } else {
-        Write-Output 'This terminal has not picked it up yet. Either paste:'
+    if (-not $inSession) {
+        Write-Output 'This terminal has not picked up the PATH change. Either paste:'
         Write-Output $refresh
         Write-Output 'or open a new terminal.'
+        Write-Output ''
     }
 } else {
     Write-Output ('NOTE: ' + $binDir + ' is not in your user PATH.')

@@ -1,4 +1,4 @@
-# wcp.ps1 — minimal upload wrapper with a compact roundtrip code, for Windows.
+# wcp.ps1 - minimal upload wrapper with a compact roundtrip code, for Windows.
 #
 # USAGE:
 #   wcp path\to\file.txt        # upload -> prints a short code, e.g. "brbkswy"
@@ -10,7 +10,7 @@
 #   wcp get <full-url> [-o file] # retrieve by a full URL instead of a code
 #
 # Retrieved text prints to stdout; retrieved files are saved into the current
-# folder. Existing files are never overwritten — _1, _2 are appended and the
+# folder. Existing files are never overwritten - _1, _2 are appended and the
 # name actually used is printed.
 #
 # The first character of the printed code encodes BOTH the backend and the
@@ -348,7 +348,7 @@ function Do-ExplicitRetrieve([string]$Code) {
     $fetchUrl = "$($fetchHost.TrimEnd('/'))/$DecodeId"
     if (-not (Invoke-Retrieve $fetchUrl $null)) {
         Write-Error "wcp: no such code '$Code' ($backendName, $extStr)"
-        Write-Error "wcp: $backendName codes expire — the default window is 1h"
+        Write-Error "wcp: $backendName codes expire - the default window is 1h"
         return $false
     }
     return $true
@@ -513,7 +513,7 @@ if ($DoPaste) {
     }
     $clip = Get-Clipboard -Raw
     if ([string]::IsNullOrEmpty($clip)) {
-        Write-Error "wcp: clipboard is empty — nothing to upload"
+        Write-Error "wcp: clipboard is empty - nothing to upload"
         exit 1
     }
     $PasteContent = $clip

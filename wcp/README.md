@@ -223,12 +223,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wcp.ps1" %*
 - If you uploaded with a custom `--host` (a self-hosted instance), retrieving that code later also needs the same `--host` — without it, retrieval falls back to the public default for that backend letter and won't find your self-hosted copy.
 - This does **not** work against the custom `cp-site` built earlier in this project — that one uses a different API shape (`/up` endpoint, split `/down` + `/f` flow, and already does its own text-vs-file distinction server-side rather than via `Content-Type` sniffing). Adding a `cp-site` backend here would be straightforward if wanted (same pattern as `catbox`/`litterbox`).
 
-## Removed backends
-
-On 2026-08-20, the following backends were dropped:
-- `0x0` — HTTP 503, uploads disabled upstream.
-- `transfer.sh` — service shut down, connection refused.
-
 ## Caveat
 
 Litterbox codes stop resolving after the expiry window. Use `--backend catbox` or set `WCP_BACKEND=catbox` for permanent storage. wcp does NOT switch automatically — catbox is the manual fallback.

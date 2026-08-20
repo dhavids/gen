@@ -277,11 +277,11 @@ function Invoke-EncryptedRetrieve([string]$Url, [string]$Key, [string]$OutFile) 
             $rest = New-Object byte[] ($plain.Length - $nl - 1)
             [Array]::Copy($plain, $nl + 1, $rest, 0, $rest.Length)
             [System.IO.File]::WriteAllBytes($target, $rest)
-            Write-Output ("Saved as " + (Split-Path -Leaf $target))
+            [Console]::Out.WriteLine("Saved as " + (Split-Path -Leaf $target))
         } elseif ($OutFile) {
             $target = Get-UniqueSaveName $OutFile
             [System.IO.File]::WriteAllBytes($target, $plain)
-            Write-Output ("Saved to " + $target)
+            [Console]::Out.WriteLine("Saved to " + $target)
         } else {
             [Console]::Out.Write([System.Text.Encoding]::UTF8.GetString($plain))
         }
@@ -310,15 +310,15 @@ function Invoke-Retrieve([string]$Url, [string]$OverrideOut) {
         if ($OverrideOut) {
             $outName = Get-UniqueSaveName $OverrideOut
             Move-Item -Force $bodyFile $outName
-            Write-Output "Saved to $outName"
+            [Console]::Out.WriteLine("Saved to " + $outName)
         } elseif ($ctype -like "text/*") {
-            Get-Content -Raw $bodyFile
+            [Console]::Out.Write([System.IO.File]::ReadAllText($bodyFile))
         } else {
             $fname = Split-Path -Leaf ($Url -replace '\?.*$', '')
             if ([string]::IsNullOrEmpty($fname)) { $fname = "downloaded_file" }
             $target = Get-UniqueSaveName "./$fname"
             Move-Item -Force $bodyFile $target
-            Write-Output "Saved as $(Split-Path -Leaf $target)"
+            [Console]::Out.WriteLine("Saved as " + (Split-Path -Leaf $target))
         }
         return $true
     } finally {

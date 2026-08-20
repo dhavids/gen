@@ -174,5 +174,3 @@ if ($already) {
 Write-Output ''
 Write-Output 'Done. Test with:'
 Write-Output '  wcp hello world'
-Write-Output ''
-Write-Output 'Encryption uses openssl and is interchangeable with the bash build.'

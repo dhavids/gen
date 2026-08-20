@@ -7,8 +7,8 @@
 #   echo "text" | wcp           # no args -> reads stdin, prints a code
 #   wcp brbkswy                 # retrieve (implicit): may fall back to uploading
 #   wcp . brbkswy               # retrieve (explicit): errors instead of falling back
-#   wcp get brbkswy             # retrieve (explicit): same as above
-#   wcp get <full-url> [-o file] # retrieve by a full URL instead of a code
+#   wcp . <full-url>            # retrieve by URL instead of a code
+#   wcp . brbkswy -o out.txt    # ...saved under a name you choose
 #
 # Retrieved text prints to stdout; retrieved files are saved into the current
 # folder. Existing files are never overwritten — _1, _2 are appended and the
@@ -19,9 +19,6 @@
 # Digits 0/1 mean the extension is not in the built-in table (the literal
 # .ext follows the prefix). A typical code is 7 characters long.
 # Letters p-z, P-Z and digits 2-9 are reserved for a future third backend.
-#
-# Old-format codes with a literal extension (e.g. aAbCd.txt, c96k8z8.txt)
-# still resolve correctly for backward compatibility.
 #
 # -b / --backend and --host work for both directions: on upload they choose
 # which service and endpoint is used; on retrieval, --host overrides the
@@ -35,7 +32,7 @@
 # Collision handling: a candidate of 7 chars or fewer that looks like a code is
 # tried as a retrieval first; if that 404s it falls back to uploading it as
 # text. Longer candidates are only tried if they contain a . or a - (escape and
-# old-format codes carry a dot, encrypted codes a dash), so an ordinary long
+# escape-path codes carry a dot, encrypted codes a dash), so an ordinary long
 # word is uploaded straight away with no wasted request.
 #
 # Encryption default depends on the backend: litterbox uploads are plain
@@ -46,7 +43,7 @@
 # Losing the KEY loses the data permanently.
 #   wcp -b c hello world -> B0ojyr4-AbCdEfGhIjKl
 # openssl is needed only when encrypting; the litterbox default does not use it.
-# Files are encrypted only if text and <= 100 KB; others upload as-is with a warning.
+# Files up to 1 MB are encrypted, any type; larger ones upload as-is with a warning.
 # Short aliases: -b backend, -c copy, -e encrypt, -p plain, -t time.
 set -euo pipefail
 
@@ -102,18 +99,7 @@ decode_code() {
   local letter="${candidate:0:1}"
   local rest="${candidate:1}"
 
-  # 2.1 Backward compatibility: old-format codes with a literal dot
-  if [[ "$letter" == "a" || "$letter" == "c" ]] && [[ "$rest" == *.* ]]; then
-    if [[ "$letter" == "a" ]]; then
-      DECODED_BACKEND="litterbox"
-    else
-      DECODED_BACKEND="catbox"
-    fi
-    DECODED_ID="$rest"
-    return 0
-  fi
-
-  # 2.2 Digit prefix: unlisted extension, REST has literal .ext
+  # Digit prefix: extension is not in the table, REST holds the literal .ext.
   if [[ "$letter" == "0" || "$letter" == "1" ]]; then
     if [[ "$letter" == "0" ]]; then
       DECODED_BACKEND="litterbox"
@@ -124,7 +110,7 @@ decode_code() {
     return 0
   fi
 
-  # 2.3 Alphabetic prefix: lookup extension in table
+  # Alphabetic prefix: look the extension up in the table.
   local i
   if [[ "$letter" =~ [a-z] ]]; then
     DECODED_BACKEND="litterbox"
@@ -194,8 +180,10 @@ retrieve_url() {
     | cut -d: -f2- | tr -d '\r' | xargs || true)"
 
   if [[ -n "$override_out" ]]; then
-    mv "$bodyfile" "$override_out"
-    echo "Saved to $override_out"
+    local out_name
+    out_name="$(unique_save_name "$override_out")"
+    mv "$bodyfile" "$out_name"
+    echo "Saved to $out_name"
   elif [[ "$ctype" == text/* ]]; then
     emit_text "$bodyfile"
     rm -f "$bodyfile"
@@ -263,17 +251,6 @@ decrypt_content() {
   base64 -d | openssl enc -d -aes-256-cbc -pbkdf2 -iter 10000 -pass "pass:$key"
 }
 
-is_text_file() {
-  local f="$1"
-  if command -v file &>/dev/null; then
-    local mime
-    mime="$(file -b --mime-type "$f")"
-    [[ "$mime" == text/* ]]
-  else
-    return 1
-  fi
-}
-
 human_size() {
   local bytes="$1"
   if [[ $bytes -ge 1048576 ]]; then
@@ -316,7 +293,8 @@ unique_save_name() {
   done
 }
 
-KEY_LEN=12
+KEY_LEN="${WCP_KEY_LEN:-12}"
+MAX_ENC_SIZE=1048576
 
 # Build a KEY_LEN key from [A-Za-z0-9], failing if it is malformed.
 gen_key() {
@@ -334,7 +312,7 @@ gen_key() {
 
 # Decrypt a body, saving under its wcp-name header or printing it.
 decrypt_and_emit() {
-  local key="$1" bodyfile="$2"
+  local key="$1" bodyfile="$2" override_out="${3:-}"
   local plainfile first_line fname save_name
   plainfile="$(mktemp /tmp/wcp-dec.XXXXXX)"
   if ! decrypt_content "$key" < "$bodyfile" > "$plainfile" 2>/dev/null; then
@@ -343,7 +321,16 @@ decrypt_and_emit() {
     return 1
   fi
   IFS= read -r first_line < "$plainfile" || first_line=""
-  if [[ "$first_line" == wcp-name:* ]]; then
+  if [[ -n "$override_out" ]]; then
+    local out_name
+    out_name="$(unique_save_name "$override_out")"
+    if [[ "$first_line" == wcp-name:* ]]; then
+      tail -n +2 "$plainfile" > "$out_name"
+    else
+      cp "$plainfile" "$out_name"
+    fi
+    echo "Saved to $out_name"
+  elif [[ "$first_line" == wcp-name:* ]]; then
     fname="${first_line#wcp-name:}"
     save_name="$(unique_save_name "./$fname")"
     tail -n +2 "$plainfile" > "$save_name"
@@ -365,8 +352,8 @@ Usage:
   echo text | wcp                upload stdin
   wcp                            read stdin; use this for MULTI-LINE text
   wcp <code>                     retrieve; falls back to uploading on a miss
-  wcp . <code>                   retrieve; errors on a miss
-  wcp get <code|url> [-o file]   retrieve explicitly
+  wcp . <code|url>               retrieve; errors on a miss
+  wcp <code|url> -o <file>       retrieve and save under a chosen name
 
 Options:
   -b, --backend <name>   litterbox (default) or catbox; -b l / -b c also work
@@ -375,6 +362,7 @@ Options:
   -e, --encrypt          force client-side encryption
   -p, --plain            force no encryption
   -c, --copy             copy the resulting code to the clipboard
+  -k, --key-len <n>      encryption key length, 12 to 64 (default 12)
   -v, --paste            upload the clipboard contents (takes no arguments)
   -h, --help             show this help
 
@@ -386,7 +374,7 @@ Multi-line text cannot be passed as arguments: the shell splits a pasted
 block on its newlines before wcp runs, so only the first line arrives. Run
 bare 'wcp', paste, then press Ctrl-D.
 
-Env: WCP_BACKEND, WCP_TIME (whole hours), WCP_PLAIN=1
+Env: WCP_BACKEND, WCP_TIME (whole hours), WCP_PLAIN=1, WCP_KEY_LEN
 USAGE
 }
 
@@ -398,6 +386,7 @@ LBHOURS="${WCP_TIME:-1}"
 HOST=""
 COPY=0
 PASTE=0
+OUT_FILE=""
 PLAIN=0
 ENCRYPT=0
 EXPLICIT_ENCRYPT=0
@@ -442,6 +431,18 @@ while [[ $# -gt 0 ]]; do
       COPY=1
       shift
       ;;
+    -o|--output)
+      OUT_FILE="$2"
+      shift 2
+      ;;
+    -k|--key-len)
+      KEY_LEN="$2"
+      shift 2
+      ;;
+    --key-len=*)
+      KEY_LEN="${1#*=}"
+      shift
+      ;;
     -v|--paste)
       PASTE=1
       shift
@@ -477,6 +478,12 @@ if [[ "${WCP_PLAIN:-0}" == "1" ]]; then
   PLAIN=1
 fi
 
+# A key shorter than 12 chars drops under ~71 bits, which is too weak to store.
+if [[ ! "$KEY_LEN" =~ ^[0-9]+$ ]] || [[ "$KEY_LEN" -lt 12 || "$KEY_LEN" -gt 64 ]]; then
+  echo "wcp: --key-len must be a whole number from 12 to 64 (default 12)" >&2
+  exit 1
+fi
+
 # Select the encryption mode for this upload.
 WARN_NO_OPENSSL=0
 if [[ $PLAIN -eq 1 ]]; then
@@ -501,7 +508,7 @@ fi
 # Explicit Retrieval
 
 do_explicit_retrieve() {
-  local code="$1"
+  local code="$1" override_out="${2:-}"
   local letter="${code:0:1}"
 
   # Check if this is an encrypted code (contains '-')
@@ -576,13 +583,13 @@ do_explicit_retrieve() {
     fi
     rm -f "$hdrfile"
 
-    if ! decrypt_and_emit "$enc_key" "$bodyfile"; then
+    if ! decrypt_and_emit "$enc_key" "$bodyfile" "$override_out"; then
       rm -f "$bodyfile"
       return 1
     fi
     rm -f "$bodyfile"
   else
-    if ! retrieve_url "${fetch_host%/}/${DECODED_ID}"; then
+    if ! retrieve_url "${fetch_host%/}/${DECODED_ID}" "$override_out"; then
       code_not_found "$code" "$backend_name" "$ext_str"
       return 1
     fi
@@ -590,12 +597,25 @@ do_explicit_retrieve() {
   return 0
 }
 
+# A leading dot, or -o on its own, both mean an explicit retrieval.
+target=""
 if [[ "${ARGS[0]:-}" == "." ]]; then
-  if [[ ${#ARGS[@]} -lt 2 ]]; then
-    echo "wcp: . needs a code, e.g. wcp . b0ojyr4" >&2
+  target="${ARGS[1]:-}"
+  if [[ -z "$target" ]]; then
+    echo "wcp: . needs a code or URL, e.g. wcp . b0ojyr4" >&2
     exit 1
   fi
-  if ! do_explicit_retrieve "${ARGS[1]}"; then
+elif [[ -n "$OUT_FILE" && ${#ARGS[@]} -eq 1 ]]; then
+  target="${ARGS[0]}"
+fi
+
+if [[ -n "$target" ]]; then
+  if [[ "$target" == http://* || "$target" == https://* ]]; then
+    if ! retrieve_url "$target" "$OUT_FILE"; then
+      echo "wcp: failed to fetch $target" >&2
+      exit 1
+    fi
+  elif ! do_explicit_retrieve "$target" "$OUT_FILE"; then
     exit 1
   fi
   exit 0
@@ -620,34 +640,6 @@ if [[ $PASTE -eq 1 ]]; then
   # Hand it to the existing stdin path. The fd survives the unlink.
   exec < "$PASTE_TMP"
   rm -f "$PASTE_TMP"
-fi
-
-if [[ "${ARGS[0]:-}" == "get" ]]; then
-  local_get_url=""
-  local_get_out=""
-  local_i=1
-  while [[ $local_i -lt ${#ARGS[@]} ]]; do
-    case "${ARGS[$local_i]}" in
-      -o|--output) local_get_out="${ARGS[$((local_i+1))]}"; local_i=$((local_i+2)) ;;
-      *) local_get_url="${ARGS[$local_i]}"; local_i=$((local_i+1)) ;;
-    esac
-  done
-  if [[ -z "$local_get_url" ]]; then
-    echo "Usage: wcp get <url|code> [-o outputfile]" >&2
-    exit 1
-  fi
-  # Distinguish URL from code by scheme
-  if [[ "$local_get_url" == http://* || "$local_get_url" == https://* ]]; then
-    if ! retrieve_url "$local_get_url" "$local_get_out"; then
-      echo "wcp: failed to fetch $local_get_url" >&2
-      exit 1
-    fi
-  else
-    if ! do_explicit_retrieve "$local_get_url"; then
-      exit 1
-    fi
-  fi
-  exit 0
 fi
 
 
@@ -719,7 +711,7 @@ if [[ ${#ARGS[@]} -eq 1 && ! -f "${ARGS[0]}" ]]; then
       fi
       # else: fall through to upload (only for non-encrypted)
     elif [[ "$ACTUAL_CANDIDATE" == *.* ]]; then
-      # Backward-compat old-format code (letter a/c with dot in rest)
+      # Escape-path code: the literal .ext follows the id.
       if [[ -n "$HOST" ]]; then
         FETCH_HOST="$HOST"
       elif [[ "$DECODED_BACKEND" == "catbox" ]]; then
@@ -887,35 +879,30 @@ elif [[ ${#ARGS[@]} -eq 1 && -f "${ARGS[0]}" ]]; then
     check_openssl
     FPATH="${ARGS[0]}"
     FSIZE="$(stat -c%s "$FPATH" 2>/dev/null || stat -f%z "$FPATH" 2>/dev/null)"
-    if is_text_file "$FPATH"; then
-      if [[ "$FSIZE" -le 102400 ]]; then
-        KEY="$(gen_key)"
-        FNAME="$(basename "$FPATH")"
-        TMPF="$(mktemp /tmp/wcp-enc.XXXXXX)"
-        { printf 'wcp-name:%s\n' "$FNAME"; cat "$FPATH"; } \
-          | encrypt_content "$KEY" > "$TMPF"
-        ENC_CONTENT="$(cat "$TMPF")"
-        rm -f "$TMPF"
-        RESULT="$(dispatch text "$ENC_CONTENT")"
-        if [[ ! "$RESULT" =~ ^https?://[^[:space:]]+$ ]]; then
-          echo "wcp: upload failed on backend '$BACKEND' ($HOST)" >&2
-          echo "wcp: backend reply: ${RESULT:-<empty response>}" >&2
-          exit 1
-        fi
-        ID_FULL="$(strip_host "$RESULT")"
-        CODE="$(encode_id "$ID_FULL" "$BACKEND")"
-        echo "${CODE}-${KEY}"
-        if [[ $COPY -eq 1 ]]; then do_copy "${CODE}-${KEY}"; fi
-        exit 0
-      else
-        HSIZE="$(human_size "$FSIZE")"
-        BN="$(basename "$FPATH")"
-        echo "wcp: not encrypting $BN - $HSIZE over the 100 KB limit, uploading as-is" >&2
-        RESULT="$(dispatch file "$FPATH")"
+    if [[ "$FSIZE" -le $MAX_ENC_SIZE ]]; then
+      KEY="$(gen_key)"
+      FNAME="$(basename "$FPATH")"
+      TMPF="$(mktemp /tmp/wcp-enc.XXXXXX)"
+      { printf 'wcp-name:%s\n' "$FNAME"; cat "$FPATH"; } \
+        | encrypt_content "$KEY" > "$TMPF"
+      ENC_CONTENT="$(cat "$TMPF")"
+      rm -f "$TMPF"
+      RESULT="$(dispatch text "$ENC_CONTENT")"
+      if [[ ! "$RESULT" =~ ^https?://[^[:space:]]+$ ]]; then
+        echo "wcp: upload failed on backend '$BACKEND' ($HOST)" >&2
+        echo "wcp: backend reply: ${RESULT:-<empty response>}" >&2
+        exit 1
       fi
+      ID_FULL="$(strip_host "$RESULT")"
+      CODE="$(encode_id "$ID_FULL" "$BACKEND")"
+      echo "${CODE}-${KEY}"
+      if [[ $COPY -eq 1 ]]; then do_copy "${CODE}-${KEY}"; fi
+      exit 0
     else
+      HSIZE="$(human_size "$FSIZE")"
+      LIMIT="$(human_size $MAX_ENC_SIZE)"
       BN="$(basename "$FPATH")"
-      echo "wcp: not encrypting $BN - not a text file, uploading as-is" >&2
+      echo "wcp: not encrypting $BN - $HSIZE over the $LIMIT limit, uploading as-is" >&2
       RESULT="$(dispatch file "$FPATH")"
     fi
   else

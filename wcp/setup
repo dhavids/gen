@@ -116,13 +116,8 @@ install_unix() {
     echo "Installed: $target"
 
     case ":$PATH:" in
-        *":$(dirname "$target"):"*)
-            tdir="$(dirname "$target")"
-            echo "$tdir is already in your PATH - you can run 'wcp' directly."
-            ;;
-        *)
-            add_to_path "$(dirname "$target")"
-            ;;
+        *":$(dirname "$target"):"*) ;;
+        *) add_to_path "$(dirname "$target")" ;;
     esac
 }
 
@@ -141,7 +136,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wcp.ps1" %*
 EOF
 
     echo "Installed: $bin_dir/wcp.ps1"
-    echo "Installed: $bin_dir/wcp.cmd  (lets you just type 'wcp')"
+    echo "Installed: $bin_dir/wcp.cmd"
     echo ""
 
     # Add to the Windows user PATH via PowerShell, if powershell.exe is reachable.

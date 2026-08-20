@@ -855,6 +855,17 @@ if [[ ${#ARGS[@]} -eq 0 || ( ${#ARGS[@]} -eq 1 && "${ARGS[0]}" == "-" ) ]]; then
   if [[ -t 0 ]]; then
     echo "wcp: reading stdin — paste or type, then Ctrl-D to send (Ctrl-C cancels)" >&2
   fi
+  # Buffer stdin so an empty input fails with our own message instead of
+  # leaking the backend's, and so both branches below read the same bytes.
+  STDIN_TMP="$(mktemp /tmp/wcp-stdin.XXXXXX)"
+  cat > "$STDIN_TMP"
+  if [[ ! -s "$STDIN_TMP" ]]; then
+    rm -f "$STDIN_TMP"
+    echo "wcp: nothing on stdin — nothing to upload" >&2
+    exit 1
+  fi
+  exec < "$STDIN_TMP"
+  rm -f "$STDIN_TMP"
   if [[ $ENCRYPT -eq 1 ]]; then
     check_openssl
     KEY="$(gen_key)"

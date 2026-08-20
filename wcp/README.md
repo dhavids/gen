@@ -83,7 +83,7 @@ wcp . brbkswy                              # retrieve; error on a miss instead o
 wcp -b c path/to/file.txt                  # catbox (permanent, encrypted by default)
 wcp -t 24 some text                        # litterbox expiry in hours
 wcp -e -k 32 secret.txt                    # longer encryption key
-wcp -c some text                           # also copy the resulting code to the clipboard
+wcp -n some text                           # do not copy the code to the clipboard
 wcp -v                                     # upload the clipboard contents
 ```
 
@@ -172,10 +172,12 @@ Note: these aliases follow the **backend name**, not the code prefix letters. Co
 | | Used for | Without it |
 |---|---|---|
 | `openssl` | encryption | `-e` errors; a non-litterbox default warns and uploads plain |
-| `pbcopy`, `xclip`, or `wl-copy` | `-c` copies the code to the clipboard | `-c` does nothing |
+| `pbcopy`, `xclip`, or `wl-copy` | copying the code to the clipboard | nothing is copied |
 | `pbpaste`, `xclip`, or `wl-paste` | `-v` uploads the clipboard | `-v` errors |
 
-Clipboard tools are tried in that order, and are not present in an SSH session . Use wcp -> <your text> -> Ctrl+D.
+Clipboard tools are tried in that order, and must match the running display server — `wl-copy` needs Wayland, `xclip` and `xsel` need X11. An SSH session has neither; use `wcp` -> `<your text>` -> Ctrl+D there.
+
+The code is copied automatically when `wcp` runs in a terminal, and not when its output is redirected or captured, so `C=$(wcp file.txt)` leaves your clipboard alone. `-c` copies anyway, `-n` or `WCP_NO_COPY=1` never does. With no usable tool the automatic copy is skipped silently; `-c` names the package to install.
 
 ## Install
 

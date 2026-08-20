@@ -374,7 +374,8 @@ Options:
   -t, --time <hours>     litterbox expiry, rounds up to 1/12/24/72 (default 1)
   -e, --encrypt          force client-side encryption
   -p, --plain            force no encryption
-  -c, --copy             copy the resulting code to the clipboard
+  -c, --copy             copy the code even when output is redirected
+  -n, --no-copy          do not copy the code to the clipboard
   -k, --key-len <n>      encryption key length, 12 to 64 (default 12)
   -v, --paste            upload the clipboard contents (takes no arguments)
   -h, --help             show this help
@@ -387,7 +388,7 @@ Multi-line text cannot be passed as arguments: the shell splits a pasted
 block on its newlines before wcp runs, so only the first line arrives. Run
 bare 'wcp', paste, then press Ctrl-D.
 
-Env: WCP_BACKEND, WCP_TIME (whole hours), WCP_PLAIN=1, WCP_KEY_LEN
+Env: WCP_BACKEND, WCP_TIME (whole hours), WCP_PLAIN=1, WCP_KEY_LEN, WCP_NO_COPY=1
 USAGE
 }
 
@@ -398,6 +399,8 @@ BACKEND="${WCP_BACKEND:-litterbox}"
 LBHOURS="${WCP_TIME:-1}"
 HOST=""
 COPY=0
+NO_COPY=0
+if [[ "${WCP_NO_COPY:-0}" == "1" ]]; then NO_COPY=1; fi
 PASTE=0
 OUT_FILE=""
 PLAIN=0
@@ -442,6 +445,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     -c|--copy)
       COPY=1
+      shift
+      ;;
+    -n|--no-copy)
+      NO_COPY=1
       shift
       ;;
     -o|--output)
@@ -775,7 +782,7 @@ HOST="${HOST%/}"
 # Match the tool to the session: a tool present for the wrong display server
 # cannot connect. Redirect stdio too, or the forked daemon holds our stdout.
 do_copy() {
-  local text="$1" rc=0
+  local text="$1" quiet="${2:-}" rc=0
   if command -v pbcopy &>/dev/null; then
     printf '%s' "$text" | pbcopy >/dev/null 2>&1 || rc=$?
   elif [[ -n "${WAYLAND_DISPLAY:-}" ]] && command -v wl-copy &>/dev/null; then
@@ -785,11 +792,26 @@ do_copy() {
   elif [[ -n "${DISPLAY:-}" ]] && command -v xsel &>/dev/null; then
     printf '%s' "$text" | xsel --clipboard --input >/dev/null 2>&1 || rc=$?
   else
-    echo "wcp: -c found no usable clipboard tool; install $(clip_hint)" >&2
+    if [[ -z "$quiet" ]]; then
+      echo "wcp: -c found no usable clipboard tool; install $(clip_hint)" >&2
+    fi
     return 0
   fi
-  if [[ $rc -ne 0 ]]; then
+  if [[ $rc -ne 0 && -z "$quiet" ]]; then
     echo "wcp: -c could not reach the clipboard (tool exited $rc)" >&2
+  fi
+}
+
+# Copy by default on a terminal; only -c reports when the clipboard is unusable.
+maybe_copy() {
+  local text="$1"
+  if [[ $NO_COPY -eq 1 ]]; then
+    return 0
+  fi
+  if [[ $COPY -eq 1 ]]; then
+    do_copy "$text"
+  elif [[ -t 1 ]]; then
+    do_copy "$text" quiet
   fi
 }
 
@@ -892,7 +914,7 @@ if [[ ${#ARGS[@]} -eq 0 || ( ${#ARGS[@]} -eq 1 && "${ARGS[0]}" == "-" ) ]]; then
     ID_FULL="$(strip_host "$RESULT")"
     CODE="$(encode_id "$ID_FULL" "$BACKEND")"
     echo "${CODE}-${KEY}"
-    if [[ $COPY -eq 1 ]]; then do_copy "${CODE}-${KEY}"; fi
+    maybe_copy "${CODE}-${KEY}"
     exit 0
   else
     RESULT="$(dispatch stdin)"
@@ -919,7 +941,7 @@ elif [[ ${#ARGS[@]} -eq 1 && -f "${ARGS[0]}" ]]; then
       ID_FULL="$(strip_host "$RESULT")"
       CODE="$(encode_id "$ID_FULL" "$BACKEND")"
       echo "${CODE}-${KEY}"
-      if [[ $COPY -eq 1 ]]; then do_copy "${CODE}-${KEY}"; fi
+      maybe_copy "${CODE}-${KEY}"
       exit 0
     else
       HSIZE="$(human_size "$FSIZE")"
@@ -949,7 +971,7 @@ else
     ID_FULL="$(strip_host "$RESULT")"
     CODE="$(encode_id "$ID_FULL" "$BACKEND")"
     echo "${CODE}-${KEY}"
-    if [[ $COPY -eq 1 ]]; then do_copy "${CODE}-${KEY}"; fi
+    maybe_copy "${CODE}-${KEY}"
     exit 0
   else
     TEXT="${ARGS[*]}"
@@ -967,4 +989,4 @@ ID_FULL="$(strip_host "$RESULT")"
 CODE="$(encode_id "$ID_FULL" "$BACKEND")"
 
 echo "$CODE"
-if [[ $COPY -eq 1 ]]; then do_copy "$CODE"; fi
+maybe_copy "$CODE"

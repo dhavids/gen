@@ -355,14 +355,15 @@ Options:
       --host <url>       override the backend endpoint, or the fetch host
   -t, --time <hours>     litterbox expiry, rounds up to 1/12/24/72 (default 1)
   -p, --plain            upload without encryption
-  -c, --copy             copy the resulting code to the clipboard
+  -c, --copy             copy the code even when output is redirected
+  -n, --no-copy          do not copy the code to the clipboard
   -v, --paste            upload the clipboard contents (takes no arguments)
   -h, --help             show this help
 
 Encryption is NOT implemented in this PowerShell version. All uploads require
 --plain (-p) or WCP_PLAIN=1 since encryption is on by default.
 
-Env: WCP_BACKEND, WCP_TIME (whole hours), WCP_PLAIN=1
+Env: WCP_BACKEND, WCP_TIME (whole hours), WCP_PLAIN=1, WCP_NO_COPY=1
 "@
 }
 
@@ -373,6 +374,8 @@ $Backend = if ($env:WCP_BACKEND) { $env:WCP_BACKEND } else { "litterbox" }
 $LbHours = if ($env:WCP_TIME) { $env:WCP_TIME } else { 1 }
 $UploadHost = ""
 $DoCopy = $false
+$NoCopy = $false
+if ($env:WCP_NO_COPY -eq '1') { $NoCopy = $true }
 $Plain = $false
 $DoPaste = $false
 $OutFile = $null
@@ -418,6 +421,8 @@ while ($i -lt $args.Count) {
         $LbHours = $a.Substring(7); $i += 1
     } elseif ($a -eq "--copy" -or $a -eq "-c") {
         $DoCopy = $true; $i += 1
+    } elseif ($a -eq "--no-copy" -or $a -eq "-n") {
+        $NoCopy = $true; $i += 1
     } elseif ($a -eq "-v" -or $a -eq "--paste") {
         $DoPaste = $true; $i += 1
     } elseif ($a -eq "-k" -or $a -eq "--key-len") {
@@ -756,6 +761,22 @@ if ($key) {
 
 Write-Output $code
 
-if ($DoCopy) {
-    $code | Set-Clipboard
+# Copy by default on a terminal; only -c reports when the clipboard is unusable.
+$wantCopy = $false
+if (-not $NoCopy) {
+    if ($DoCopy) {
+        $wantCopy = $true
+    } elseif (-not [Console]::IsOutputRedirected) {
+        $wantCopy = $true
+    }
+}
+
+if ($wantCopy) {
+    try {
+        $code | Set-Clipboard
+    } catch {
+        if ($DoCopy) {
+            Write-Error "wcp: -c could not reach the clipboard"
+        }
+    }
 }

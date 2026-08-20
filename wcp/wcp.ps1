@@ -386,11 +386,18 @@ function Invoke-TestSheet([string]$Sheet) {
 
 # Spawn wcp as a child so its stderr is a real stream the sheet can capture.
 function wcp {
-    if (Test-Path -LiteralPath $script:WcpCmd) {
-        $input | & $script:WcpCmd @args 2>&1
-    } else {
-        $ps = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $script:WcpBin)
-        $input | & powershell @ps @args 2>&1
+    $ErrorActionPreference = 'Continue'
+    $stdin = @($input)
+    $quoted = ($args | ForEach-Object { '"' + $_ + '"' }) -join ' '
+    if ($stdin.Count -eq 0) {
+        return (& cmd /c "`"$script:WcpCmd`" $quoted" 2>&1)
+    }
+    $tmp = [System.IO.Path]::GetTempFileName()
+    try {
+        Set-Content -LiteralPath $tmp -Value $stdin -Encoding Ascii
+        & cmd /c "`"$script:WcpCmd`" $quoted < `"$tmp`"" 2>&1
+    } finally {
+        Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue
     }
 }
 
@@ -542,6 +549,8 @@ function New-WcpKey([int]$Len) {
 }
 
 function Protect-Bytes([byte[]]$Plain, [string]$Key) {
+    # Keep curl and openssl stderr non-fatal.
+    $ErrorActionPreference = 'Continue'
     $inFile = New-TempPath
     $outFile = New-TempPath
     try {
@@ -560,6 +569,8 @@ function Protect-Bytes([byte[]]$Plain, [string]$Key) {
 }
 
 function Unprotect-Bytes([string]$B64, [string]$Key) {
+    # Keep curl and openssl stderr non-fatal.
+    $ErrorActionPreference = 'Continue'
     $inFile = New-TempPath
     $outFile = New-TempPath
     try {
@@ -579,6 +590,8 @@ function Unprotect-Bytes([string]$B64, [string]$Key) {
 
 # Fetch ciphertext, decrypt, then save under its wcp-name header or print it.
 function Invoke-EncryptedRetrieve([string]$Url, [string]$Key, [string]$OutFile) {
+    # Keep curl and openssl stderr non-fatal.
+    $ErrorActionPreference = 'Continue'
     $bodyFile = New-TempPath
     try {
         $status = & curl.exe -sSL -o $bodyFile -w '%{http_code}' $Url
@@ -615,6 +628,8 @@ function Invoke-EncryptedRetrieve([string]$Url, [string]$Key, [string]$OutFile) 
 }
 
 function Invoke-Retrieve([string]$Url, [string]$OverrideOut) {
+    # Keep curl and openssl stderr non-fatal.
+    $ErrorActionPreference = 'Continue'
     $hdrFile = [System.IO.Path]::GetTempFileName()
     $bodyFile = [System.IO.Path]::GetTempFileName()
     try {
@@ -1110,6 +1125,8 @@ function Write-TempFile([string]$Content) {
 }
 
 function Upload-Catbox([string]$Kind, [string]$Arg) {
+    # Keep curl and openssl stderr non-fatal.
+    $ErrorActionPreference = 'Continue'
     switch ($Kind) {
         "file"  {
             return & curl.exe -sS -F "reqtype=fileupload" `
@@ -1136,6 +1153,8 @@ function Upload-Catbox([string]$Kind, [string]$Arg) {
 }
 
 function Upload-Litterbox([string]$Kind, [string]$Arg) {
+    # Keep curl and openssl stderr non-fatal.
+    $ErrorActionPreference = 'Continue'
     switch ($Kind) {
         "file"  {
             return & curl.exe -sS -F "reqtype=fileupload" -F "time=$LbTime" `

@@ -57,9 +57,11 @@ When text is printed **to a terminal**, `wcp` adds a trailing newline if the con
 ## Usage
 
 ```bash
+wcp -h                                     # show usage and exit
 wcp path/to/file.txt                       # single existing file -> uploaded as-is, prints a code
 wcp some words here                        # not a file -> joined with spaces, uploaded as text, prints a code
 echo "text" | wcp                          # no args -> reads stdin, prints a code
+wcp                                        # bare: reads stdin — use this for multi-line text
 wcp brbkswy                                # retrieve by code (implicit) -> saves or prints depending on type
 wcp . brbkswy                              # retrieve by code (explicit) -> always retrieves, never falls back to upload
 wcp get brbkswy                            # retrieve by code (explicit) -> same as above
@@ -72,6 +74,7 @@ wcp -t 24 some text                        # litterbox with 24-hour expiry (roun
 WCP_BACKEND=catbox wcp hello               # env var to pick backend
 WCP_TIME=24 wcp hello                      # env var to pick litterbox expiry (whole hours, default 1)
 wcp --copy some text                       # also copy the resulting code to clipboard
+wcp -v                                     # upload the clipboard contents (multi-line safe)
 wcp -c some text                           # same, using short alias
 wcp -e hello world                         # force encryption -> prints CODE-KEY
 wcp -b c some text                         # catbox: encrypted by default

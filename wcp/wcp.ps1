@@ -208,6 +208,35 @@ function Invoke-Retrieve([string]$Url, [string]$OverrideOut) {
     }
 }
 
+function Show-Usage {
+    @"
+wcp - upload a file, some text, or stdin; get back a short code.
+
+Usage:
+  wcp <file>                     upload a file
+  wcp some words here            upload text
+  Get-Content file | wcp         upload stdin
+  wcp <code>                     retrieve; falls back to uploading on a miss
+  wcp . <code>                   retrieve; errors on a miss
+  wcp get <code|url> [-o file]   retrieve explicitly
+
+Options:
+  -b, --backend <name>   litterbox (default) or catbox; -b l / -b c also work
+      --host <url>       override the backend endpoint, or the fetch host
+  -t, --time <hours>     litterbox expiry, rounds up to 1/12/24/72 (default 1)
+  -p, --plain            upload without encryption
+  -c, --copy             copy the resulting code to the clipboard
+  -v, --paste            upload the clipboard contents (takes no arguments)
+  -h, --help             show this help
+
+Encryption is NOT implemented in this PowerShell version. litterbox (the
+default) is plain, so normal use works. Targeting catbox, passing -e, or
+retrieving a code containing a - all error out; use --plain for catbox.
+
+Env: WCP_BACKEND, WCP_TIME (whole hours), WCP_PLAIN=1
+"@
+}
+
 # --- parse flags once, for both upload and retrieval paths ------------------
 
 $Backend = if ($env:WCP_BACKEND) { $env:WCP_BACKEND } else { "litterbox" }
@@ -215,6 +244,7 @@ $LbHours = if ($env:WCP_TIME) { $env:WCP_TIME } else { 1 }
 $UploadHost = ""
 $DoCopy = $false
 $Plain = $false
+$DoPaste = $false
 $rest = @()
 
 $i = 0
@@ -254,6 +284,11 @@ while ($i -lt $args.Count) {
         $LbHours = $a.Substring(7); $i += 1
     } elseif ($a -eq "--copy" -or $a -eq "-c") {
         $DoCopy = $true; $i += 1
+    } elseif ($a -eq "-v" -or $a -eq "--paste") {
+        $DoPaste = $true; $i += 1
+    } elseif ($a -eq "-h" -or $a -eq "--help") {
+        Show-Usage
+        exit 0
     } elseif ($a -eq "-p" -or $a -eq "--plain") {
         $Plain = $true; $i += 1
     } elseif ($a -eq "-e" -or $a -eq "--encrypt") {
@@ -471,13 +506,28 @@ function Dispatch([string]$Kind, [string]$Arg) {
     }
 }
 
+if ($DoPaste) {
+    if ($rest.Count -gt 0) {
+        Write-Error "wcp: -v/--paste takes no arguments (it uploads the clipboard)"
+        exit 1
+    }
+    $clip = Get-Clipboard -Raw
+    if ([string]::IsNullOrEmpty($clip)) {
+        Write-Error "wcp: clipboard is empty — nothing to upload"
+        exit 1
+    }
+    $PasteContent = $clip
+}
+
 if (-not $Plain -and $Backend -ne "litterbox") {
     Write-Error "wcp: $Backend uploads are encrypted by default, which is not yet supported in the PowerShell version"
     Write-Error "wcp: use --plain (-p) to upload without encryption"
     exit 1
 }
 
-if ($rest.Count -eq 0 -or ($rest.Count -eq 1 -and $rest[0] -eq "-")) {
+if ($DoPaste) {
+    $result = Dispatch "text" $PasteContent
+} elseif ($rest.Count -eq 0 -or ($rest.Count -eq 1 -and $rest[0] -eq "-")) {
     $result = Dispatch "stdin" ""
 } elseif ($rest.Count -eq 1 -and (Test-Path -LiteralPath $rest[0] -PathType Leaf)) {
     $result = Dispatch "file" $rest[0]

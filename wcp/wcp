@@ -214,6 +214,20 @@ retrieve_url() {
 
 # --- helper functions -------------------------------------------------------
 
+# Read the clipboard. Mirrors do_copy's tool preference. Returns 2 when no
+# clipboard tool exists, so the caller can tell "no tool" from "empty".
+do_paste() {
+  if command -v pbpaste &>/dev/null; then
+    pbpaste
+  elif command -v xclip &>/dev/null; then
+    xclip -selection clipboard -o 2>/dev/null
+  elif command -v wl-paste &>/dev/null; then
+    wl-paste --no-newline 2>/dev/null
+  else
+    return 2
+  fi
+}
+
 # Print retrieved text. On a terminal, add a trailing newline when the content
 # lacks one, so the shell prompt starts on its own line. When redirected or
 # piped, emit the bytes untouched — round-trips must stay byte-exact.
@@ -349,12 +363,48 @@ decrypt_and_emit() {
   return 0
 }
 
+usage() {
+    cat << 'USAGE'
+wcp — upload a file, some text, or stdin; get back a short code.
+
+Usage:
+  wcp <file>                     upload a file
+  wcp some words here            upload text
+  echo text | wcp                upload stdin
+  wcp                            read stdin; use this for MULTI-LINE text
+  wcp <code>                     retrieve; falls back to uploading on a miss
+  wcp . <code>                   retrieve; errors on a miss
+  wcp get <code|url> [-o file]   retrieve explicitly
+
+Options:
+  -b, --backend <name>   litterbox (default) or catbox; -b l / -b c also work
+      --host <url>       override the backend endpoint, or the fetch host
+  -t, --time <hours>     litterbox expiry, rounds up to 1/12/24/72 (default 1)
+  -e, --encrypt          force client-side encryption
+  -p, --plain            force no encryption
+  -c, --copy             copy the resulting code to the clipboard
+  -v, --paste            upload the clipboard contents (takes no arguments)
+  -h, --help             show this help
+
+Encryption: litterbox is plain because it expires; every other backend is
+encrypted. The key travels inside the code and never reaches the server, so
+losing the code loses the data. openssl is required only when encrypting.
+
+Multi-line text cannot be passed as arguments: the shell splits a pasted
+block on its newlines before wcp runs, so only the first line arrives. Run
+bare 'wcp', paste, then press Ctrl-D.
+
+Env: WCP_BACKEND, WCP_TIME (whole hours), WCP_PLAIN=1
+USAGE
+}
+
 # --- parse flags once, for both upload and retrieval paths ------------------
 
 BACKEND="${WCP_BACKEND:-litterbox}"
 LBHOURS="${WCP_TIME:-1}"
 HOST=""
 COPY=0
+PASTE=0
 PLAIN=0
 ENCRYPT=0
 EXPLICIT_ENCRYPT=0
@@ -398,6 +448,14 @@ while [[ $# -gt 0 ]]; do
     -c|--copy)
       COPY=1
       shift
+      ;;
+    -v|--paste)
+      PASTE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
       ;;
     -e|--encrypt)
       EXPLICIT_ENCRYPT=1
@@ -550,6 +608,27 @@ if [[ "${ARGS[0]:-}" == "." ]]; then
     exit 1
   fi
   exit 0
+fi
+
+if [[ $PASTE -eq 1 ]]; then
+  if [[ ${#ARGS[@]} -gt 0 ]]; then
+    echo "wcp: -v/--paste takes no arguments (it uploads the clipboard)" >&2
+    exit 1
+  fi
+  PASTE_TMP="$(mktemp /tmp/wcp-clip.XXXXXX)"
+  if ! do_paste > "$PASTE_TMP" 2>/dev/null; then
+    rm -f "$PASTE_TMP"
+    echo "wcp: no clipboard tool found (need pbpaste, xclip, or wl-paste)" >&2
+    exit 1
+  fi
+  if [[ ! -s "$PASTE_TMP" ]]; then
+    rm -f "$PASTE_TMP"
+    echo "wcp: clipboard is empty — nothing to upload" >&2
+    exit 1
+  fi
+  # Hand it to the existing stdin path. The fd survives the unlink.
+  exec < "$PASTE_TMP"
+  rm -f "$PASTE_TMP"
 fi
 
 if [[ "${ARGS[0]:-}" == "get" ]]; then
@@ -770,6 +849,12 @@ if [[ $WARN_NO_OPENSSL -eq 1 ]]; then
 fi
 
 if [[ ${#ARGS[@]} -eq 0 || ( ${#ARGS[@]} -eq 1 && "${ARGS[0]}" == "-" ) ]]; then
+  # A terminal on stdin means the user is about to type or paste. Say so,
+  # otherwise the wait looks like a hang. This is the route for multi-line
+  # text: as arguments, the shell would split it on newlines first.
+  if [[ -t 0 ]]; then
+    echo "wcp: reading stdin — paste or type, then Ctrl-D to send (Ctrl-C cancels)" >&2
+  fi
   if [[ $ENCRYPT -eq 1 ]]; then
     check_openssl
     KEY="$(gen_key)"

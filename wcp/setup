@@ -39,8 +39,7 @@ OS="$(detect_os)"
 echo "Detected: $OS"
 echo ""
 
-# Markers wrapping anything this script writes into a shell profile, so an
-# uninstaller can delete exactly this block and leave the rest of the file alone.
+# Markers so an uninstaller can delete exactly this block.
 WCP_BEGIN="# >>> wcp >>>"
 WCP_END="# <<< wcp <<<"
 
@@ -72,8 +71,7 @@ add_to_path() {
     echo ""
     echo "NOTE: $dir is not in your PATH."
 
-    # Never prompt when there is no one to answer; a setup run from a pipe or
-    # CI should print instructions rather than hang.
+    # Never prompt when nothing can answer.
     if [ ! -t 0 ]; then
         echo "Not running interactively, so $profile was not modified."
         echo "Add this to your shell profile:"
@@ -119,7 +117,8 @@ install_unix() {
 
     case ":$PATH:" in
         *":$(dirname "$target"):"*)
-            echo "$(dirname "$target") is already in your PATH — you can run 'wcp' directly."
+            tdir="$(dirname "$target")"
+            echo "$tdir is already in your PATH - you can run 'wcp' directly."
             ;;
         *)
             add_to_path "$(dirname "$target")"
@@ -128,8 +127,7 @@ install_unix() {
 }
 
 install_windows() {
-    # Convert a Unix-style path (as seen from Git Bash/MSYS2) to a native
-    # Windows path for the parts we hand to cmd.exe/PowerShell.
+    # Convert a Unix-style path to a native Windows path.
     local win_home
     win_home="$(cd "$HOME" && pwd -W 2>/dev/null || echo "$HOME")"
     local bin_dir="$HOME/bin"
@@ -143,7 +141,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wcp.ps1" %*
 EOF
 
     echo "Installed: $bin_dir/wcp.ps1"
-    echo "Installed: $bin_dir/wcp.cmd  (lets you just type 'wcp' from cmd.exe or PowerShell)"
+    echo "Installed: $bin_dir/wcp.cmd  (lets you just type 'wcp')"
     echo ""
 
     # Add to the Windows user PATH via PowerShell, if powershell.exe is reachable.
@@ -154,8 +152,9 @@ EOF
             \$dir = '$win_bin_dir';
             \$current = [Environment]::GetEnvironmentVariable('Path', 'User');
             if (\$current -notlike \"*\$dir*\") {
-                [Environment]::SetEnvironmentVariable('Path', \"\$current;\$dir\", 'User');
-                Write-Output 'Added to User PATH — restart your terminal for it to take effect.';
+                \$joined = \"\$current;\$dir\";
+                [Environment]::SetEnvironmentVariable('Path', \$joined, 'User');
+                Write-Output 'Added to User PATH - restart your terminal.';
             } else {
                 Write-Output 'Already in PATH.';
             }

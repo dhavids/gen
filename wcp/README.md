@@ -176,6 +176,14 @@ powershell -ExecutionPolicy Bypass -File setup.ps1
 - **Windows (via Git Bash, MSYS2, or similar):** `bash setup` installs `wcp.ps1` and a `wcp.cmd` launcher (so plain `wcp` works from cmd.exe, PowerShell, or Git Bash) into `%USERPROFILE%\bin`, and adds that folder to your user `PATH` automatically if `powershell.exe` is reachable.
 - **Windows PowerShell, no bash or WSL:** `setup.ps1` does the same natively — installs `wcp.ps1` and `wcp.cmd` into `%USERPROFILE%\bin`, checks `curl.exe` is present, and asks before adding that folder to your user `PATH`. It prints the exact command to undo the `PATH` change, since a registry variable can't carry removal markers the way a shell profile can.
 
+  `setup.ps1` runs as a child process, so it cannot change the `PATH` of the shell that launched it — the equivalent of `source ~/.bashrc` is to rebuild the session `PATH` from both persisted scopes:
+
+  ```powershell
+  $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
+  ```
+
+  The script prints that line for you. Opening a new terminal works too, and dot-sourcing the installer (`. .\setup.ps1`) refreshes the session directly because it then runs *in* your shell rather than a child of it.
+
   Encryption is not implemented in the PowerShell build. litterbox (the default backend) is plain, so normal use works; `catbox` needs `--plain`, and codes containing a `-` cannot be retrieved there.
 
 After running it, test with:

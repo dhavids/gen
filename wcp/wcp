@@ -165,9 +165,7 @@ litterbox_time_bucket() {
   fi
 }
 
-# Strip "scheme://host" off a URL, leaving just the path (the "id"),
-# regardless of which host actually issued it. Works for both backends'
-# real response shapes, including catbox's cross-domain quirk.
+# Strip scheme://host from a URL, leaving the path as the id.
 strip_host() {
   local url="$1"
   url="${url#https://}"
@@ -176,7 +174,8 @@ strip_host() {
   echo "$url"
 }
 
-# --- retrieval: given a full URL, print (text) or save (file) --------------
+
+# Retrieval
 
 retrieve_url() {
   local url="$1"
@@ -191,7 +190,8 @@ retrieve_url() {
     return 1
   fi
 
-  ctype="$(grep -i '^content-type:' "$hdrfile" | tail -1 | cut -d: -f2- | tr -d '\r' | xargs || true)"
+  ctype="$(grep -i '^content-type:' "$hdrfile" | tail -1 \
+    | cut -d: -f2- | tr -d '\r' | xargs || true)"
 
   if [[ -n "$override_out" ]]; then
     mv "$bodyfile" "$override_out"
@@ -212,10 +212,10 @@ retrieve_url() {
   return 0
 }
 
-# --- helper functions -------------------------------------------------------
 
-# Read the clipboard. Mirrors do_copy's tool preference. Returns 2 when no
-# clipboard tool exists, so the caller can tell "no tool" from "empty".
+# Helpers
+
+# Read the clipboard. Returns 2 when no clipboard tool exists.
 do_paste() {
   if command -v pbpaste &>/dev/null; then
     pbpaste
@@ -228,9 +228,7 @@ do_paste() {
   fi
 }
 
-# Print retrieved text. On a terminal, add a trailing newline when the content
-# lacks one, so the shell prompt starts on its own line. When redirected or
-# piped, emit the bytes untouched — round-trips must stay byte-exact.
+# Print retrieved text, adding a trailing newline only on a terminal.
 emit_text() {
   local f="$1"
   cat "$f"
@@ -287,8 +285,7 @@ human_size() {
   fi
 }
 
-# Generate a unique filename by appending _1, _2, etc. before the extension.
-# The LAST dot separates the extension: archive.tar.gz -> archive.tar_1.gz
+# Append _1, _2 before the extension until the name is free.
 unique_save_name() {
   local base="$1"
   if [[ ! -e "$base" ]]; then
@@ -321,10 +318,7 @@ unique_save_name() {
 
 KEY_LEN=12
 
-# Build a key from an explicit [A-Za-z0-9] whitelist. tr -dc keeps only those
-# characters, so the alphabet holds by construction rather than by inspection,
-# and the loop guarantees the length even if a draw is filtered heavily.
-# The final check makes the invariant fail loudly instead of silently.
+# Build a KEY_LEN key from [A-Za-z0-9], failing if it is malformed.
 gen_key() {
   local k=""
   while [[ ${#k} -lt $KEY_LEN ]]; do
@@ -338,9 +332,7 @@ gen_key() {
   printf '%s' "$k"
 }
 
-# Decrypt a fetched body, then either save it under its original name
-# (wcp-name header) or print it. Works through files, never command
-# substitution, which would strip trailing newlines from the payload.
+# Decrypt a body, saving under its wcp-name header or printing it.
 decrypt_and_emit() {
   local key="$1" bodyfile="$2"
   local plainfile first_line fname save_name
@@ -398,7 +390,8 @@ Env: WCP_BACKEND, WCP_TIME (whole hours), WCP_PLAIN=1
 USAGE
 }
 
-# --- parse flags once, for both upload and retrieval paths ------------------
+
+# Flag Parsing
 
 BACKEND="${WCP_BACKEND:-litterbox}"
 LBHOURS="${WCP_TIME:-1}"
@@ -484,11 +477,7 @@ if [[ "${WCP_PLAIN:-0}" == "1" ]]; then
   PLAIN=1
 fi
 
-# Decide whether this upload gets encrypted.
-#   --plain wins outright
-#   -e forces it, and fails hard if openssl is missing
-#   litterbox defaults to plain: it expires, so the exposure window is short
-#   any other backend defaults to encrypted, degrading with a warning
+# Select the encryption mode for this upload.
 WARN_NO_OPENSSL=0
 if [[ $PLAIN -eq 1 ]]; then
   ENCRYPT=0
@@ -508,7 +497,8 @@ else
   WARN_NO_OPENSSL=1
 fi
 
-# --- explicit retrieval: wcp . [code] or wcp get [code/url] ----------------
+
+# Explicit Retrieval
 
 do_explicit_retrieve() {
   local code="$1"
@@ -577,7 +567,8 @@ do_explicit_retrieve() {
     local hdrfile bodyfile http_code
     hdrfile="$(mktemp)"
     bodyfile="$(mktemp)"
-    http_code="$(curl -sSL -D "$hdrfile" -o "$bodyfile" -w '%{http_code}' "${fetch_host%/}/${DECODED_ID}")"
+    http_code="$(curl -sSL -D "$hdrfile" -o "$bodyfile" \
+      -w '%{http_code}' "${fetch_host%/}/${DECODED_ID}")"
     if [[ "$http_code" -ge 400 ]]; then
       rm -f "$hdrfile" "$bodyfile"
       code_not_found "$actual_code" "$backend_name" "$ext_str"
@@ -659,7 +650,8 @@ if [[ "${ARGS[0]:-}" == "get" ]]; then
   exit 0
 fi
 
-# --- short-code retrieval: single token, not an existing local file --------
+
+# Short Code Retrieval
 
 if [[ ${#ARGS[@]} -eq 1 && ! -f "${ARGS[0]}" ]]; then
   CANDIDATE="${ARGS[0]}"
@@ -705,7 +697,8 @@ if [[ ${#ARGS[@]} -eq 1 && ! -f "${ARGS[0]}" ]]; then
         check_openssl
         enc_hdrfile="$(mktemp)"
         enc_bodyfile="$(mktemp)"
-        enc_http_code="$(curl -sSL -D "$enc_hdrfile" -o "$enc_bodyfile" -w '%{http_code}' "${FETCH_HOST%/}/${DECODED_ID}")"
+        enc_http_code="$(curl -sSL -D "$enc_hdrfile" -o "$enc_bodyfile" \
+          -w '%{http_code}' "${FETCH_HOST%/}/${DECODED_ID}")"
         if [[ "$enc_http_code" -ge 400 ]]; then
           rm -f "$enc_hdrfile" "$enc_bodyfile"
           code_not_found "$ACTUAL_CANDIDATE" "$DECODED_BACKEND" ""
@@ -739,7 +732,8 @@ if [[ ${#ARGS[@]} -eq 1 && ! -f "${ARGS[0]}" ]]; then
         check_openssl
         enc_hdrfile="$(mktemp)"
         enc_bodyfile="$(mktemp)"
-        enc_http_code="$(curl -sSL -D "$enc_hdrfile" -o "$enc_bodyfile" -w '%{http_code}' "${FETCH_HOST%/}/${DECODED_ID}")"
+        enc_http_code="$(curl -sSL -D "$enc_hdrfile" -o "$enc_bodyfile" \
+          -w '%{http_code}' "${FETCH_HOST%/}/${DECODED_ID}")"
         if [[ "$enc_http_code" -ge 400 ]]; then
           rm -f "$enc_hdrfile" "$enc_bodyfile"
           code_not_found "$ACTUAL_CANDIDATE" "$DECODED_BACKEND" ""
@@ -784,7 +778,8 @@ do_copy() {
   fi
 }
 
-# --- backend: catbox (POST, multipart reqtype=fileupload) -------------------
+
+# Backends
 
 up_catbox_file()  { curl -sS -F "reqtype=fileupload" -F "fileToUpload=@${1}" "$HOST"; }
 up_catbox_text() {
@@ -803,7 +798,10 @@ up_catbox_stdin() {
 }
 
 # backend: litterbox (POST, multipart reqtype=fileupload + time)
-up_litterbox_file()  { curl -sS -F "reqtype=fileupload" -F "time=${LBTIME}" -F "fileToUpload=@${1}" "$HOST"; }
+up_litterbox_file() {
+  curl -sS -F "reqtype=fileupload" -F "time=${LBTIME}" \
+    -F "fileToUpload=@${1}" "$HOST"
+}
 up_litterbox_text() {
   local tmp
   tmp="$(mktemp /tmp/wcp-paste.XXXXXX.txt)"
@@ -849,14 +847,11 @@ if [[ $WARN_NO_OPENSSL -eq 1 ]]; then
 fi
 
 if [[ ${#ARGS[@]} -eq 0 || ( ${#ARGS[@]} -eq 1 && "${ARGS[0]}" == "-" ) ]]; then
-  # A terminal on stdin means the user is about to type or paste. Say so,
-  # otherwise the wait looks like a hang. This is the route for multi-line
-  # text: as arguments, the shell would split it on newlines first.
+  # Announce that we are waiting on stdin.
   if [[ -t 0 ]]; then
     echo "wcp: reading stdin — paste or type, then Ctrl-D to send (Ctrl-C cancels)" >&2
   fi
-  # Buffer stdin so an empty input fails with our own message instead of
-  # leaking the backend's, and so both branches below read the same bytes.
+  # Buffer stdin so empty input is rejected before uploading.
   STDIN_TMP="$(mktemp /tmp/wcp-stdin.XXXXXX)"
   cat > "$STDIN_TMP"
   if [[ ! -s "$STDIN_TMP" ]]; then
@@ -897,7 +892,8 @@ elif [[ ${#ARGS[@]} -eq 1 && -f "${ARGS[0]}" ]]; then
         KEY="$(gen_key)"
         FNAME="$(basename "$FPATH")"
         TMPF="$(mktemp /tmp/wcp-enc.XXXXXX)"
-        { printf 'wcp-name:%s\n' "$FNAME"; cat "$FPATH"; } | encrypt_content "$KEY" > "$TMPF"
+        { printf 'wcp-name:%s\n' "$FNAME"; cat "$FPATH"; } \
+          | encrypt_content "$KEY" > "$TMPF"
         ENC_CONTENT="$(cat "$TMPF")"
         rm -f "$TMPF"
         RESULT="$(dispatch text "$ENC_CONTENT")"
@@ -913,11 +909,13 @@ elif [[ ${#ARGS[@]} -eq 1 && -f "${ARGS[0]}" ]]; then
         exit 0
       else
         HSIZE="$(human_size "$FSIZE")"
-        echo "wcp: not encrypting $(basename "$FPATH") — ${HSIZE} exceeds the 100 KB limit, uploading as-is" >&2
+        BN="$(basename "$FPATH")"
+        echo "wcp: not encrypting $BN - $HSIZE over the 100 KB limit, uploading as-is" >&2
         RESULT="$(dispatch file "$FPATH")"
       fi
     else
-      echo "wcp: not encrypting $(basename "$FPATH") — not a text file, uploading as-is" >&2
+      BN="$(basename "$FPATH")"
+      echo "wcp: not encrypting $BN - not a text file, uploading as-is" >&2
       RESULT="$(dispatch file "$FPATH")"
     fi
   else

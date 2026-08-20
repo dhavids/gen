@@ -53,7 +53,8 @@ $DefaultFetchHostLitterbox = "https://litter.catbox.moe"
 $DefaultLitterboxTime = "1h"
 
 # Extension table: index 0 = no extension, 1..14 = common extensions.
-$ExtTable = @("", "txt", "md", "log", "json", "yaml", "csv", "conf", "sh", "py", "png", "jpg", "pdf", "zip", "gz")
+$ExtTable = @("", "txt", "md", "log", "json", "yaml", "csv", "conf",
+              "sh", "py", "png", "jpg", "pdf", "zip", "gz")
 
 function Get-ExtIndex([string]$Ext) {
     for ($i = 0; $i -lt $ExtTable.Count; $i++) {
@@ -171,7 +172,8 @@ function Get-UniqueSaveName([string]$Name) {
     }
 }
 
-# --- retrieval: given a full URL, print (text) or save (file) --------------
+
+# Retrieval
 
 function Invoke-Retrieve([string]$Url, [string]$OverrideOut) {
     $hdrFile = [System.IO.Path]::GetTempFileName()
@@ -237,7 +239,8 @@ Env: WCP_BACKEND, WCP_TIME (whole hours), WCP_PLAIN=1
 "@
 }
 
-# --- parse flags once, for both upload and retrieval paths ------------------
+
+# Flag Parsing
 
 $Backend = if ($env:WCP_BACKEND) { $env:WCP_BACKEND } else { "litterbox" }
 $LbHours = if ($env:WCP_TIME) { $env:WCP_TIME } else { 1 }
@@ -337,7 +340,12 @@ function Do-ExplicitRetrieve([string]$Code) {
     }
 
     # Resolve fetch host
-    $fetchHost = if ($UploadHost) { $UploadHost } elseif ($backendName -eq "catbox") { $DefaultFetchHostCatbox } else { $DefaultFetchHostLitterbox }
+    $fetchHost = $DefaultFetchHostLitterbox
+    if ($UploadHost) {
+        $fetchHost = $UploadHost
+    } elseif ($backendName -eq "catbox") {
+        $fetchHost = $DefaultFetchHostCatbox
+    }
 
     # Decode the code to get the ID
     if (-not (Decode-Code $Code)) {
@@ -354,7 +362,8 @@ function Do-ExplicitRetrieve([string]$Code) {
     return $true
 }
 
-# --- explicit retrieval: wcp . [code] or wcp get [code/url] ----------------
+
+# Explicit Retrieval
 
 # Check for encrypted code (contains '-')
 if ($rest.Count -gt 1 -and $rest[1].Contains("-")) {
@@ -376,8 +385,9 @@ if ($rest.Count -gt 0 -and $rest[0] -eq ".") {
 if ($rest.Count -gt 0 -and $rest[0] -eq "get") {
     # Check for encrypted code in get form
     for ($j = 1; $j -lt $rest.Count; $j++) {
-        if ($rest[$j] -ne "-o" -and $rest[$j] -ne "--output" -and $rest[$j].Contains("-")) {
-            Write-Error "wcp: encrypted codes are not yet supported in the PowerShell version"
+        $tok = $rest[$j]
+        if ($tok -ne "-o" -and $tok -ne "--output" -and $tok.Contains("-")) {
+            Write-Error "wcp: encrypted codes are not supported in this build"
             exit 1
         }
     }
@@ -409,7 +419,8 @@ if ($rest.Count -gt 0 -and $rest[0] -eq "get") {
     exit 0
 }
 
-# --- short-code retrieval: single token, not an existing local file --------
+
+# Short Code Retrieval
 
 if ($rest.Count -eq 1 -and -not (Test-Path -LiteralPath $rest[0] -PathType Leaf)) {
     if ($rest[0].Contains("-")) {
@@ -428,14 +439,24 @@ if ($rest.Count -eq 1 -and -not (Test-Path -LiteralPath $rest[0] -PathType Leaf)
     if (Decode-Code $Candidate) {
         # Short candidates may be codes; longer ones only if they carry a dot.
         if ($Candidate.Length -le 7 -and $RestPart -cmatch '^[0-9a-zA-Z]+$') {
-            $FetchHost = if ($UploadHost) { $UploadHost } elseif ($DecodeBackend -eq "catbox") { $DefaultFetchHostCatbox } else { $DefaultFetchHostLitterbox }
+            $FetchHost = $DefaultFetchHostLitterbox
+            if ($UploadHost) {
+                $FetchHost = $UploadHost
+            } elseif ($DecodeBackend -eq "catbox") {
+                $FetchHost = $DefaultFetchHostCatbox
+            }
             $fetchUrl = "$($FetchHost.TrimEnd('/'))/$DecodeId"
             if (Invoke-Retrieve $fetchUrl $null) {
                 exit 0
             }
         } elseif ($Candidate.Contains(".")) {
             # Backward-compat old-format code
-            $FetchHost = if ($UploadHost) { $UploadHost } elseif ($DecodeBackend -eq "catbox") { $DefaultFetchHostCatbox } else { $DefaultFetchHostLitterbox }
+            $FetchHost = $DefaultFetchHostLitterbox
+            if ($UploadHost) {
+                $FetchHost = $UploadHost
+            } elseif ($DecodeBackend -eq "catbox") {
+                $FetchHost = $DefaultFetchHostCatbox
+            }
             $fetchUrl = "$($FetchHost.TrimEnd('/'))/$DecodeId"
             if (Invoke-Retrieve $fetchUrl $null) {
                 exit 0
@@ -457,24 +478,32 @@ $UploadHost = $UploadHost.TrimEnd('/')
 
 function Write-TempFile([string]$Content) {
     $tmp = [System.IO.Path]::GetTempFileName()
-    [System.IO.File]::WriteAllText($tmp, $Content, [System.Text.UTF8Encoding]::new($false))
+    $enc = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::WriteAllText($tmp, $Content, $enc)
     return $tmp
 }
 
 function Upload-Catbox([string]$Kind, [string]$Arg) {
     switch ($Kind) {
         "file"  {
-            return & curl.exe -sS -F "reqtype=fileupload" -F "fileToUpload=@$Arg" $UploadHost
+            return & curl.exe -sS -F "reqtype=fileupload" `
+                -F "fileToUpload=@$Arg" $UploadHost
         }
         "text"  {
             $tmp = Write-TempFile $Arg
-            try { return & curl.exe -sS -F "reqtype=fileupload" -F "fileToUpload=@$tmp" $UploadHost }
+            try {
+                return & curl.exe -sS -F "reqtype=fileupload" `
+                    -F "fileToUpload=@$tmp" $UploadHost
+            }
             finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
         }
         "stdin" {
             $content = [Console]::In.ReadToEnd()
             $tmp = Write-TempFile $content
-            try { return & curl.exe -sS -F "reqtype=fileupload" -F "fileToUpload=@$tmp" $UploadHost }
+            try {
+                return & curl.exe -sS -F "reqtype=fileupload" `
+                    -F "fileToUpload=@$tmp" $UploadHost
+            }
             finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
         }
     }
@@ -483,17 +512,24 @@ function Upload-Catbox([string]$Kind, [string]$Arg) {
 function Upload-Litterbox([string]$Kind, [string]$Arg) {
     switch ($Kind) {
         "file"  {
-            return & curl.exe -sS -F "reqtype=fileupload" -F "time=$LbTime" -F "fileToUpload=@$Arg" $UploadHost
+            return & curl.exe -sS -F "reqtype=fileupload" -F "time=$LbTime" `
+                -F "fileToUpload=@$Arg" $UploadHost
         }
         "text"  {
             $tmp = Write-TempFile $Arg
-            try { return & curl.exe -sS -F "reqtype=fileupload" -F "time=$LbTime" -F "fileToUpload=@$tmp" $UploadHost }
+            try {
+                return & curl.exe -sS -F "reqtype=fileupload" -F "time=$LbTime" `
+                    -F "fileToUpload=@$tmp" $UploadHost
+            }
             finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
         }
         "stdin" {
             $content = [Console]::In.ReadToEnd()
             $tmp = Write-TempFile $content
-            try { return & curl.exe -sS -F "reqtype=fileupload" -F "time=$LbTime" -F "fileToUpload=@$tmp" $UploadHost }
+            try {
+                return & curl.exe -sS -F "reqtype=fileupload" -F "time=$LbTime" `
+                    -F "fileToUpload=@$tmp" $UploadHost
+            }
             finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
         }
     }
@@ -520,7 +556,8 @@ if ($DoPaste) {
 }
 
 if (-not $Plain -and $Backend -ne "litterbox") {
-    Write-Error "wcp: $Backend uploads are encrypted by default, which is not yet supported in the PowerShell version"
+    Write-Error "wcp: $Backend uploads are encrypted by default, which this build"
+    Write-Error "wcp: does not support. Use --plain (-p) to upload without it."
     Write-Error "wcp: use --plain (-p) to upload without encryption"
     exit 1
 }
@@ -538,7 +575,11 @@ if ($DoPaste) {
 
 if ($result -notmatch '^https?://\S+$') {
     Write-Error "wcp: upload failed on backend '$Backend' ($UploadHost)"
-    Write-Error "wcp: backend replied: $(if ($result) { $result } else { '<empty response>' })"
+    $reply = $result
+    if (-not $reply) {
+        $reply = "<empty response>"
+    }
+    Write-Error "wcp: backend replied: $reply"
     exit 1
 }
 

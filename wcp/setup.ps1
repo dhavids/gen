@@ -32,7 +32,7 @@ if (-not $curlCmd) {
 
 $srcPs1 = Join-Path $srcDir 'wcp.ps1'
 if (-not (Test-Path -LiteralPath $srcPs1)) {
-    Write-Output ('ERROR: cannot find wcp.ps1 next to this script (looked in ' + $srcDir + ')')
+    Write-Output ('ERROR: no wcp.ps1 next to this script. Looked in: ' + $srcDir)
     exit 1
 }
 
@@ -42,8 +42,7 @@ $dstPs1 = Join-Path $binDir 'wcp.ps1'
 Copy-Item -LiteralPath $srcPs1 -Destination $dstPs1 -Force
 Write-Output ('Installed: ' + $dstPs1)
 
-# Thin launcher so 'wcp' works without typing .ps1, and without relaxing the
-# execution policy globally - Bypass applies only to that invocation.
+# Launcher so 'wcp' works without typing .ps1.
 $dstCmd = Join-Path $binDir 'wcp.cmd'
 $cmdLines = @(
     '@echo off',
@@ -53,9 +52,7 @@ Set-Content -LiteralPath $dstCmd -Value $cmdLines -Encoding ASCII
 Write-Output ('Installed: ' + $dstCmd + '  (lets you just type wcp)')
 Write-Output ''
 
-# Read the USER-scoped PATH only. Using $env:Path here would be a bug: that is
-# the combined machine+user value, and writing it back into the user scope
-# permanently duplicates the whole system PATH into your user variable.
+# Read the User-scoped PATH, not the combined $env:Path.
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if ($null -eq $userPath) {
     $userPath = ''
@@ -69,8 +66,15 @@ foreach ($entry in $userPath.Split(';')) {
     }
 }
 
-$undo1 = '  $p = [Environment]::GetEnvironmentVariable(''Path'',''User'')'
-$undo2 = '  $p = ($p.Split('';'') | Where-Object { $_ -ne ''' + $binDir + ''' }) -join '';'''
+$getUser = '[Environment]::GetEnvironmentVariable(''Path'',''User'')'
+$getMach = '[Environment]::GetEnvironmentVariable(''Path'',''Machine'')'
+
+# Line the user pastes to refresh PATH in the current session.
+$refresh = '  $env:Path = ' + $getMach + ' + '';'' + ' + $getUser
+
+$undo1 = '  $p = ' + $getUser
+$undoFilter = '  $p = ($p.Split('';'') | Where-Object { $_ -ne '''
+$undo2 = $undoFilter + $binDir + ''' }) -join '';'''
 $undo3 = '  [Environment]::SetEnvironmentVariable(''Path'', $p, ''User'')'
 
 if ($already) {
@@ -91,7 +95,17 @@ if ($already) {
             $newPath = $userPath + ';' + $binDir
         }
         [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
-        Write-Output 'Added to your user PATH. Open a new terminal for it to take effect.'
+        Write-Output 'Added to your user PATH.'
+        Write-Output ''
+        # Refresh this process; it cannot reach the parent shell.
+        $machPath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+        $usrPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        $env:Path = $machPath + ';' + $usrPath
+        Write-Output 'To use wcp in THIS terminal without reopening it, paste:'
+        Write-Output $refresh
+        Write-Output ''
+        Write-Output '(Or just open a new terminal. Running this script as'
+        Write-Output ' . .\setup.ps1  would have refreshed the session directly.)'
         Write-Output ''
         Write-Output 'To undo that later:'
         Write-Output $undo1
@@ -100,7 +114,8 @@ if ($already) {
     } else {
         Write-Output 'Skipped. Add it yourself when you want it:'
         Write-Output $undo1
-        Write-Output ('  [Environment]::SetEnvironmentVariable(''Path'', $p + '';' + $binDir + ''', ''User'')')
+        $addHint = '  [Environment]::SetEnvironmentVariable(''Path'', $p + '';'
+        Write-Output ($addHint + $binDir + ''', ''User'')')
         Write-Output ''
         Write-Output ('Or run wcp by full path: ' + $dstCmd)
     }

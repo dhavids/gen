@@ -1,60 +1,75 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # setup — installs wcp to the right place depending on the detected OS.
 #
-# On Linux/macOS (including WSL): installs the bash `wcp` script to
-# /usr/local/bin/wcp (or ~/.local/bin/wcp if that's not writable/doesn't
-# exist), and makes it executable.
-#
-# On native Windows (running this via Git Bash, MSYS2, or similar): installs
-# both wcp.ps1 and a wcp.cmd launcher (so plain `wcp` works from cmd.exe,
-# PowerShell, or a Git Bash prompt) into %USERPROFILE%\bin, and adds that
-# folder to the user's PATH if it isn't already there.
+# Installs the bash `wcp` script to /usr/local/bin/wcp, or ~/.local/bin/wcp
+# when that is not writable, and makes it executable.
 #
 # USAGE:
 #   bash setup
-#
-# (If you're on native Windows with no bash available at all, see the
-# "Manual Windows install" section in README.md instead — this script needs
-# some kind of shell to run, which Git Bash/WSL/MSYS2 all provide.)
+
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-detect_os() {
-    case "$(uname -s)" in
-        Linux*)
-            if grep -qi microsoft /proc/version 2>/dev/null; then
-                echo "wsl"
-            else
-                echo "linux"
-            fi
-            ;;
-        Darwin*) echo "macos" ;;
-        CYGWIN*|MINGW*|MSYS*) echo "windows" ;;
-        *) echo "unknown" ;;
+# Logging
+
+print_info() {
+  printf '%s\n' "$*"
+}
+
+print_warn() {
+  printf '%s\n' "$*" >&2
+}
+
+print_error() {
+  printf '%s\n' "$*" >&2
+}
+
+
+
+# Report every missing runtime tool at once, before installing.
+check_tools() {
+    missing=""
+    command -v curl >/dev/null 2>&1 || missing="$missing curl"
+    command -v openssl >/dev/null 2>&1 || missing="$missing openssl"
+    [ -z "$missing" ] && return 0
+    print_info "wcp needs:$missing"
+    if [ "$(uname -s)" = "Darwin" ]; then
+        print_info "  brew install$missing"
+    elif command -v apt >/dev/null 2>&1; then
+        print_info "  sudo apt install$missing"
+    elif command -v dnf >/dev/null 2>&1; then
+        print_info "  sudo dnf install$missing"
+    elif command -v pacman >/dev/null 2>&1; then
+        print_info "  sudo pacman -S$missing"
+    else
+        print_info "  install them with your package manager"
+    fi
+    print_info ""
+    printf "Install wcp anyway? [y/N] "
+    read -r reply 2>/dev/null < /dev/tty || reply=""
+    case "$reply" in
+        [Yy]*) return 0 ;;
+        *) echo "Stopped. Install the tools above, then rerun this script."
+           exit 1 ;;
     esac
 }
 
-OS="$(detect_os)"
-echo "Detected: $OS"
-echo ""
-
-# Markers so an uninstaller can delete exactly this block.
-WCP_BEGIN="# >>> wcp >>>"
-WCP_END="# <<< wcp <<<"
+readonly WCP_BEGIN="# >>> wcp >>>"
+readonly WCP_END="# <<< wcp <<<"
 
 # The profile file the user's login shell actually reads.
 profile_file() {
     case "$(basename "${SHELL:-}")" in
-        zsh)  echo "$HOME/.zshrc" ;;
+        zsh)  printf '%s\n' "$HOME/.zshrc" ;;
         bash)
             if [ -f "$HOME/.bashrc" ]; then
-                echo "$HOME/.bashrc"
+                printf '%s\n' "$HOME/.bashrc"
             else
-                echo "$HOME/.bash_profile"
+                printf '%s\n' "$HOME/.bash_profile"
             fi
             ;;
-        *)    echo "$HOME/.profile" ;;
+        *)    printf '%s\n' "$HOME/.profile" ;;
     esac
 }
 
@@ -64,18 +79,18 @@ add_to_path() {
     profile="$(profile_file)"
 
     if [ -f "$profile" ] && grep -qF "$WCP_BEGIN" "$profile"; then
-        echo "$profile already has a wcp block — leaving it alone."
+        print_info "$profile already has a wcp block — leaving it alone."
         return 0
     fi
 
-    echo ""
-    echo "NOTE: $dir is not in your PATH."
+    print_info ""
+    print_info "NOTE: $dir is not in your PATH."
 
     # Never prompt when nothing can answer.
     if [ ! -t 0 ]; then
-        echo "Not running interactively, so $profile was not modified."
-        echo "Add this to your shell profile:"
-        echo "  export PATH=\"\$PATH:$dir\""
+        print_info "Not running interactively, so $profile was not modified."
+        print_info "Add this to your shell profile:"
+        print_info "  export PATH=\"\$PATH:$dir\""
         return 0
     fi
 
@@ -83,24 +98,39 @@ add_to_path() {
     case "$reply" in
         [Yy]*) ;;
         *)
-            echo "Skipped. Add this yourself when you want it:"
-            echo "  export PATH=\"\$PATH:$dir\""
+            print_info "Skipped. Add this yourself when you want it:"
+            print_info "  export PATH=\"\$PATH:$dir\""
             return 0
             ;;
     esac
 
     {
-        echo ""
-        echo "$WCP_BEGIN"
-        echo "# Added by the wcp setup script. To remove, delete this line"
-        echo "# through the matching '<<< wcp <<<' line below."
-        echo "export PATH=\"\$PATH:$dir\""
-        echo "$WCP_END"
+        printf '\n%s\n' "$WCP_BEGIN"
+        printf '%s\n' "# Added by the wcp setup script. To remove, delete this line"
+        printf '%s\n' "# through the matching '<<< wcp <<<' line below."
+        printf 'export PATH="$PATH:%s"\n' "$dir"
+        printf '%s\n' "$WCP_END"
     } >> "$profile"
 
-    echo "Added to $profile, wrapped in $WCP_BEGIN / $WCP_END markers."
-    echo "Run 'source $profile' or open a new terminal to pick it up."
+    print_info "Added to $profile, wrapped in $WCP_BEGIN / $WCP_END markers."
+    print_info "Run 'source $profile' or open a new terminal to pick it up."
 }
+
+detect_os() {
+    case "$(uname -s)" in
+        Linux*)
+            if grep -qi microsoft /proc/version 2>/dev/null; then
+                printf 'wsl\n'
+            else
+                printf 'linux\n'
+            fi
+            ;;
+        Darwin*) printf 'macos\n' ;;
+        CYGWIN*|MINGW*|MSYS*) printf 'windows\n' ;;
+        *) printf 'unknown\n' ;;
+    esac
+}
+
 
 install_unix() {
     local target=""
@@ -113,7 +143,7 @@ install_unix() {
 
     cp "$SCRIPT_DIR/wcp" "$target"
     chmod +x "$target"
-    echo "Installed: $target"
+    print_info "Installed: $target"
 
     case ":$PATH:" in
         *":$(dirname "$target"):"*) ;;
@@ -121,60 +151,35 @@ install_unix() {
     esac
 }
 
-install_windows() {
-    # Convert a Unix-style path to a native Windows path.
-    local win_home
-    win_home="$(cd "$HOME" && pwd -W 2>/dev/null || echo "$HOME")"
-    local bin_dir="$HOME/bin"
-    mkdir -p "$bin_dir"
 
-    cp "$SCRIPT_DIR/wcp.ps1" "$bin_dir/wcp.ps1"
+# Run
 
-    cat > "$bin_dir/wcp.cmd" << 'EOF'
-@echo off
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0wcp.ps1" %*
-EOF
+main() {
+  check_tools
 
-    echo "Installed: $bin_dir/wcp.ps1"
-    echo "Installed: $bin_dir/wcp.cmd"
-    echo ""
+  OS="$(detect_os)"
+  print_info "Detected: $OS"
+  print_info ""
 
-    # Add to the Windows user PATH via PowerShell, if powershell.exe is reachable.
-    if command -v powershell.exe &>/dev/null; then
-        local win_bin_dir
-        win_bin_dir="$(cd "$bin_dir" && pwd -W 2>/dev/null || echo "$bin_dir")"
-        powershell.exe -NoProfile -Command "
-            \$dir = '$win_bin_dir';
-            \$current = [Environment]::GetEnvironmentVariable('Path', 'User');
-            if (\$current -notlike \"*\$dir*\") {
-                \$joined = \"\$current;\$dir\";
-                [Environment]::SetEnvironmentVariable('Path', \$joined, 'User');
-                Write-Output 'Added to User PATH - restart your terminal.';
-            } else {
-                Write-Output 'Already in PATH.';
-            }
-        "
-    else
-        echo "NOTE: couldn't find powershell.exe to update PATH automatically."
-        echo "Add this folder to your Windows PATH manually: $bin_dir"
-    fi
+  case "$OS" in
+      linux|macos|wsl)
+          install_unix
+          ;;
+      windows)
+          print_error "This installer only handles Linux, macOS and WSL."
+          print_error "On Windows run setup.ps1 instead:"
+          print_error "  powershell -ExecutionPolicy Bypass -File setup.ps1"
+          exit 1
+          ;;
+      *)
+          print_error "Unrecognized OS - copy 'wcp' into your PATH and chmod +x it."
+          exit 1
+          ;;
+  esac
+
+  print_info ""
+  print_info "Done. Test with:"
+  print_info "  wcp hello world"
 }
 
-case "$OS" in
-    linux|macos|wsl)
-        install_unix
-        ;;
-    windows)
-        install_windows
-        ;;
-    *)
-        echo "Unrecognized OS — install manually:"
-        echo "  Unix-like: copy 'wcp' to somewhere in your PATH, chmod +x it."
-        echo "  Windows:   copy 'wcp.ps1' somewhere in your PATH (see README.md)."
-        exit 1
-        ;;
-esac
-
-echo ""
-echo "Done. Test with:"
-echo "  wcp hello world"
+main "$@"

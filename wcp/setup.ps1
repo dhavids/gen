@@ -7,11 +7,27 @@
 # USAGE:
 #   powershell -ExecutionPolicy Bypass -File setup.ps1
 #
-# Deliberately plain style: no assignment-from-if, no backtick escapes, and
-# literal text in single quotes. Those constructs parse differently across
-# PowerShell versions and this script has to run on whatever is installed.
+# Keep this file pure ASCII: PowerShell 5.1 reads a BOM-less file as CP1252,
+# where a stray UTF-8 byte becomes a quote and breaks parsing.
 
 $ErrorActionPreference = 'Stop'
+
+# Report a missing required tool and stop, unless the user insists.
+function Confirm-Missing([string]$Tool, [string[]]$Advice) {
+    Write-Output ($Tool + ' was not found, and wcp requires it.')
+    foreach ($line in $Advice) { Write-Output $line }
+    Write-Output 'Reopen your terminal afterwards so PATH picks it up.'
+    Write-Output ''
+    $reply = ''
+    if ([Environment]::UserInteractive) {
+        $reply = Read-Host 'Install wcp anyway? [y/N]'
+    }
+    if ($reply -notmatch '^[Yy]') {
+        Write-Output ('Stopped. Install ' + $Tool + ', then rerun this script.')
+        exit 1
+    }
+    Write-Output ''
+}
 
 $srcDir = $PSScriptRoot
 if (-not $srcDir) {
@@ -22,15 +38,21 @@ $binDir = Join-Path $env:USERPROFILE 'bin'
 Write-Output 'Detected: windows (native PowerShell)'
 Write-Output ''
 
-# curl.exe ships with Windows 10 1803+ and Windows 11. wcp cannot work without it.
+# curl.exe drives every transfer.
 $curlCmd = Get-Command curl.exe -ErrorAction SilentlyContinue
 if (-not $curlCmd) {
-    Write-Output 'WARNING: curl.exe was not found on PATH.'
-    Write-Output '         wcp needs it. It ships with Windows 10 (1803+) and Windows 11.'
-    Write-Output ''
+    Confirm-Missing 'curl.exe' @(
+        'It ships with Windows 10 (1803+) and Windows 11, so a miss usually',
+        'means an older Windows or a trimmed PATH. Either put',
+        'C:\Windows\System32 back on PATH, or install curl with one of:',
+        '  winget install cURL.cURL',
+        '  choco install curl',
+        'Git for Windows also ships one at:',
+        '  C:\Program Files\Git\mingw64\bin\curl.exe'
+    )
 }
 
-# Encryption needs openssl; without it wcp still works for plain uploads.
+# openssl does all encryption, and encryption is not optional.
 $sslPath = $null
 $sslCmd = Get-Command openssl.exe -ErrorAction SilentlyContinue
 if ($sslCmd) {
@@ -48,15 +70,16 @@ if ($sslCmd) {
 }
 
 if ($sslPath) {
-    Write-Output 'Found openssl, encryption is available.'
+    Write-Output 'Found openssl.'
     Write-Output ''
 } else {
-    Write-Output 'NOTE: openssl was not found.'
-    Write-Output '      wcp works without it, but -e and catbox uploads need it.'
-    Write-Output '      Install with one of:'
-    Write-Output '        winget install ShiningLight.OpenSSL.Light'
-    Write-Output '        choco install openssl'
-    Write-Output ''
+    Confirm-Missing 'openssl' @(
+        'Install with one of:',
+        '  winget install ShiningLight.OpenSSL.Light',
+        '  choco install openssl',
+        'Git for Windows also ships one at:',
+        '  C:\Program Files\Git\usr\bin\openssl.exe'
+    )
 }
 
 $srcPs1 = Join-Path $srcDir 'wcp.ps1'

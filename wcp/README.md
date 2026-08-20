@@ -11,7 +11,8 @@ wcp QXyZ123
 ```
 
 **Files in this folder:**
-- `setup` — run this first; detects your OS and installs `wcp` to the right place
+- `setup` — run this first on Linux/macOS/WSL; detects your OS and installs `wcp`
+- `setup.ps1` — native Windows installer, for PowerShell with no bash or WSL
 - `wcp` — the Linux/macOS/WSL script
 - `wcp.ps1` — the Windows PowerShell script
 - `README.md` — this file
@@ -139,10 +140,18 @@ Note: these aliases follow the **backend name**, not the code prefix letters. Co
 
 ## Install
 
-Run `setup` once — it detects your OS and installs `wcp` to the right place automatically:
+Run the installer once. Pick the one that matches your shell — both install `wcp` and offer to put it on your `PATH`.
+
+**Linux, macOS, WSL, or Windows with Git Bash / MSYS2:**
 
 ```bash
 bash setup
+```
+
+**Windows PowerShell with no bash or WSL:**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File setup.ps1
 ```
 
 - **Linux / macOS / WSL:** installs the bash `wcp` script to `/usr/local/bin/wcp` (or `~/.local/bin/wcp` as a fallback if that's not writable) and makes it executable. If that folder isn't on your `PATH`, it asks whether to add it and, if you agree, appends the line to the profile your login shell actually reads (`~/.zshrc` for zsh, `~/.bashrc` for bash, `~/.profile` otherwise).
@@ -164,7 +173,10 @@ bash setup
   ```
 
   Re-running `setup` never adds a second block — it detects the existing markers and leaves the file alone. If `setup` is run non-interactively (piped, or from CI) it never touches your profile; it prints the line for you to add yourself.
-- **Windows (via Git Bash, MSYS2, or similar):** installs `wcp.ps1` and a `wcp.cmd` launcher (so plain `wcp` works from cmd.exe, PowerShell, or Git Bash) into `%USERPROFILE%\bin`, and adds that folder to your user `PATH` automatically if `powershell.exe` is reachable.
+- **Windows (via Git Bash, MSYS2, or similar):** `bash setup` installs `wcp.ps1` and a `wcp.cmd` launcher (so plain `wcp` works from cmd.exe, PowerShell, or Git Bash) into `%USERPROFILE%\bin`, and adds that folder to your user `PATH` automatically if `powershell.exe` is reachable.
+- **Windows PowerShell, no bash or WSL:** `setup.ps1` does the same natively — installs `wcp.ps1` and `wcp.cmd` into `%USERPROFILE%\bin`, checks `curl.exe` is present, and asks before adding that folder to your user `PATH`. It prints the exact command to undo the `PATH` change, since a registry variable can't carry removal markers the way a shell profile can.
+
+  Encryption is not implemented in the PowerShell build. litterbox (the default backend) is plain, so normal use works; `catbox` needs `--plain`, and codes containing a `-` cannot be retrieved there.
 
 After running it, test with:
 ```bash
@@ -180,12 +192,20 @@ sudo mv wcp /usr/local/bin/wcp
 ```
 Requires `curl` (already on virtually every system). `--copy` uses `pbcopy` (macOS), `xclip`, or `wl-copy` (Wayland) — whichever is found first; harmless if none are installed, it just won't copy.
 
-**Windows (PowerShell), no bash available at all:**
+**Windows (PowerShell), no bash or WSL:** run the native installer instead —
+```powershell
+powershell -ExecutionPolicy Bypass -File setup.ps1
+```
+It installs `wcp.ps1` and a `wcp.cmd` launcher into `%USERPROFILE%\bin` and asks before touching your PATH.
+
+To do it by hand:
 ```powershell
 mkdir $env:USERPROFILE\bin -Force
 Copy-Item wcp.ps1 $env:USERPROFILE\bin\wcp.ps1
-[Environment]::SetEnvironmentVariable("Path", "$env:Path;$env:USERPROFILE\bin", "User")
+$p = [Environment]::GetEnvironmentVariable("Path", "User")
+[Environment]::SetEnvironmentVariable("Path", "$p;$env:USERPROFILE\bin", "User")
 ```
+Read the **User**-scoped PATH with `GetEnvironmentVariable(...,"User")` rather than using `$env:Path`. `$env:Path` is the combined machine+user value, so writing it back into the user scope permanently duplicates your entire system PATH into your user variable.
 Requires `curl.exe`, which ships with Windows 10 (1803+) and Windows 11 by default — no separate install needed.
 
 **Making `wcp` callable without typing `.ps1`:** PowerShell requires an explicit extension for scripts by default. Either call it as `wcp.ps1 <args>`, or create the same thin `wcp.cmd` wrapper that `setup` would have created for you:

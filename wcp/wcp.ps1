@@ -170,6 +170,17 @@ function Find-OpenSsl {
         $c = Get-Command $n -ErrorAction SilentlyContinue
         if ($c) { return $c.Source }
     }
+    # Common installers do not add themselves to PATH, so look where they land.
+    $guesses = @(
+        (Join-Path $env:ProgramFiles 'OpenSSL-Win64\bin\openssl.exe'),
+        (Join-Path $env:ProgramFiles 'OpenSSL\bin\openssl.exe'),
+        (Join-Path ${env:ProgramFiles(x86)} 'OpenSSL-Win32\bin\openssl.exe'),
+        (Join-Path $env:ProgramFiles 'Git\usr\bin\openssl.exe'),
+        (Join-Path ${env:ProgramFiles(x86)} 'Git\usr\bin\openssl.exe')
+    )
+    foreach ($g in $guesses) {
+        if ($g -and (Test-Path -LiteralPath $g)) { return $g }
+    }
     return $null
 }
 

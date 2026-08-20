@@ -31,14 +31,32 @@ if (-not $curlCmd) {
 }
 
 # Encryption needs openssl; without it wcp still works for plain uploads.
+$sslPath = $null
 $sslCmd = Get-Command openssl.exe -ErrorAction SilentlyContinue
-if (-not $sslCmd) {
-    Write-Output 'NOTE: openssl.exe was not found on PATH.'
+if ($sslCmd) {
+    $sslPath = $sslCmd.Source
+} else {
+    $sslGuesses = @(
+        (Join-Path $env:ProgramFiles 'OpenSSL-Win64\bin\openssl.exe'),
+        (Join-Path $env:ProgramFiles 'OpenSSL\bin\openssl.exe'),
+        (Join-Path ${env:ProgramFiles(x86)} 'OpenSSL-Win32\bin\openssl.exe'),
+        (Join-Path $env:ProgramFiles 'Git\usr\bin\openssl.exe')
+    )
+    foreach ($g in $sslGuesses) {
+        if ($g -and (Test-Path -LiteralPath $g) -and -not $sslPath) { $sslPath = $g }
+    }
+}
+
+if ($sslPath -and -not $sslCmd) {
+    Write-Output ('Found openssl at ' + $sslPath + ' (not on PATH).')
+    Write-Output 'wcp will use it directly. Encryption is available.'
+    Write-Output ''
+} elseif (-not $sslPath) {
+    Write-Output 'NOTE: openssl was not found.'
     Write-Output '      wcp works without it, but -e and catbox uploads need it.'
     Write-Output '      Install with one of:'
     Write-Output '        winget install ShiningLight.OpenSSL.Light'
     Write-Output '        choco install openssl'
-    Write-Output '      Git for Windows also ships one in C:\Program Files\Git\usr\bin.'
     Write-Output ''
 }
 

@@ -59,10 +59,23 @@ if ($null -eq $userPath) {
 }
 
 $target = $binDir.TrimEnd('\')
+
 $already = $false
 foreach ($entry in $userPath.Split(';')) {
     if ($entry.TrimEnd('\') -ieq $target) {
         $already = $true
+    }
+}
+
+# The persisted PATH and this session's PATH are independent.
+$inSession = $false
+$sessionPath = $env:Path
+if ($null -eq $sessionPath) {
+    $sessionPath = ''
+}
+foreach ($entry in $sessionPath.Split(';')) {
+    if ($entry.TrimEnd('\') -ieq $target) {
+        $inSession = $true
     }
 }
 
@@ -78,7 +91,14 @@ $undo2 = $undoFilter + $binDir + ''' }) -join '';'''
 $undo3 = '  [Environment]::SetEnvironmentVariable(''Path'', $p, ''User'')'
 
 if ($already) {
-    Write-Output ($binDir + ' is already in your user PATH - you can run wcp directly.')
+    Write-Output ($binDir + ' is already in your user PATH.')
+    if ($inSession) {
+        Write-Output 'You can run wcp directly.'
+    } else {
+        Write-Output 'This terminal has not picked it up yet. Either paste:'
+        Write-Output $refresh
+        Write-Output 'or open a new terminal.'
+    }
 } else {
     Write-Output ('NOTE: ' + $binDir + ' is not in your user PATH.')
 

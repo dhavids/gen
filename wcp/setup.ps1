@@ -30,6 +30,18 @@ if (-not $curlCmd) {
     Write-Output ''
 }
 
+# Encryption needs openssl; without it wcp still works for plain uploads.
+$sslCmd = Get-Command openssl.exe -ErrorAction SilentlyContinue
+if (-not $sslCmd) {
+    Write-Output 'NOTE: openssl.exe was not found on PATH.'
+    Write-Output '      wcp works without it, but -e and catbox uploads need it.'
+    Write-Output '      Install with one of:'
+    Write-Output '        winget install ShiningLight.OpenSSL.Light'
+    Write-Output '        choco install openssl'
+    Write-Output '      Git for Windows also ships one in C:\Program Files\Git\usr\bin.'
+    Write-Output ''
+}
+
 $srcPs1 = Join-Path $srcDir 'wcp.ps1'
 if (-not (Test-Path -LiteralPath $srcPs1)) {
     Write-Output ('ERROR: no wcp.ps1 next to this script. Looked in: ' + $srcDir)
@@ -145,6 +157,4 @@ Write-Output ''
 Write-Output 'Done. Test with:'
 Write-Output '  wcp hello world'
 Write-Output ''
-Write-Output 'Note: this PowerShell build does not implement encryption.'
-Write-Output 'litterbox (the default backend) is plain, so normal use works.'
-Write-Output 'For catbox, pass --plain. Encrypted codes cannot be retrieved here.'
+Write-Output 'Encryption uses openssl and is interchangeable with the bash build.'

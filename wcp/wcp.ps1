@@ -6,8 +6,8 @@
 #   Get-Content file.txt | wcp  # no args -> reads stdin, prints a code
 #   wcp brbkswy                 # retrieve (implicit): may fall back to uploading
 #   wcp . brbkswy               # retrieve (explicit): errors instead of falling back
-#   wcp get brbkswy             # retrieve (explicit): same as above
-#   wcp get <full-url> [-o file] # retrieve by a full URL instead of a code
+#   wcp . <full-url>            # retrieve by URL instead of a code
+#   wcp brbkswy -o out.txt      # ...saved under a name you choose
 #
 # Retrieved text prints to stdout; retrieved files are saved into the current
 # folder. Existing files are never overwritten - _1, _2 are appended and the
@@ -18,9 +18,6 @@
 # Digits 0/1 mean the extension is not in the built-in table (the literal
 # .ext follows the prefix). A typical code is 7 characters long.
 # Letters p-z, P-Z and digits 2-9 are reserved for a future third backend.
-#
-# Old-format codes with a literal extension (e.g. aAbCd.txt, c96k8z8.txt)
-# still resolve correctly for backward compatibility.
 #
 # -b / --backend and --host work for both directions: on upload they choose
 # which service and endpoint is used; on retrieval, --host overrides the
@@ -34,7 +31,7 @@
 # Collision handling: a candidate of 7 chars or fewer that looks like a code is
 # tried as a retrieval first; if that 404s it falls back to uploading it as
 # text. Longer candidates are only tried if they contain a . or a - (escape and
-# old-format codes carry a dot, encrypted codes a dash), so an ordinary long
+# escape-path codes carry a dot, encrypted codes a dash), so an ordinary long
 # word is uploaded straight away with no wasted request.
 #
 # Encryption is NOT implemented in this PowerShell version. litterbox (the
@@ -93,14 +90,6 @@ function Encode-Id([string]$IdFull, [string]$Backend) {
 function Decode-Code([string]$Candidate) {
     $letter = $Candidate.Substring(0, 1)
     $rest = $Candidate.Substring(1)
-
-    # Backward compatibility: old-format codes with a literal dot
-    if (($letter -eq "a" -or $letter -eq "c") -and $rest.Contains(".")) {
-        $script:DecodeBackend = if ($letter -eq "a") { "litterbox" } else { "catbox" }
-        $script:DecodeId = $rest
-        $script:DecodeFetchHost = ""
-        return $true
-    }
 
     # Digit prefix: unlisted extension
     if ($letter -eq "0" -or $letter -eq "1") {
@@ -173,7 +162,120 @@ function Get-UniqueSaveName([string]$Name) {
 }
 
 
+# Encryption
+
+# Locate openssl once; the same invocation as the bash build.
+function Find-OpenSsl {
+    foreach ($n in @("openssl.exe", "openssl")) {
+        $c = Get-Command $n -ErrorAction SilentlyContinue
+        if ($c) { return $c.Source }
+    }
+    return $null
+}
+
+$OpenSslPath = Find-OpenSsl
+
+function Assert-OpenSsl {
+    if ($OpenSslPath) { return }
+    Write-Error "wcp: encryption needs openssl, which was not found on PATH."
+    Write-Error "wcp: install it with one of:"
+    Write-Error "wcp:   winget install ShiningLight.OpenSSL.Light"
+    Write-Error "wcp:   choco install openssl"
+    Write-Error "wcp: Git for Windows also ships one at C:\Program Files\Git\usr\bin."
+    Write-Error "wcp: or use --plain (-p) to upload without encryption."
+    exit 1
+}
+
+function New-TempPath {
+    $stamp = [Guid]::NewGuid().ToString('N').Substring(0, 8)
+    return (Join-Path ([System.IO.Path]::GetTempPath()) ('wcp-' + $stamp + '.bin'))
+}
+
+# Draw from [A-Za-z0-9] with rejection sampling so the alphabet stays uniform.
+function New-WcpKey([int]$Len) {
+    $chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $buf = New-Object byte[] 1
+    $out = ''
+    while ($out.Length -lt $Len) {
+        $rng.GetBytes($buf)
+        if ($buf[0] -lt 248) { $out += $chars[$buf[0] % 62] }
+    }
+    return $out
+}
+
+function Protect-Bytes([byte[]]$Plain, [string]$Key) {
+    $inFile = New-TempPath
+    $outFile = New-TempPath
+    try {
+        [System.IO.File]::WriteAllBytes($inFile, $Plain)
+        & $OpenSslPath enc -aes-256-cbc -pbkdf2 -iter 10000 -salt `
+            -pass "pass:$Key" -in $inFile -out $outFile 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "wcp: encryption failed"
+            exit 1
+        }
+        return [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($outFile))
+    } finally {
+        Remove-Item $inFile -ErrorAction SilentlyContinue
+        Remove-Item $outFile -ErrorAction SilentlyContinue
+    }
+}
+
+function Unprotect-Bytes([string]$B64, [string]$Key) {
+    $inFile = New-TempPath
+    $outFile = New-TempPath
+    try {
+        [System.IO.File]::WriteAllBytes($inFile, [Convert]::FromBase64String($B64.Trim()))
+        & $OpenSslPath enc -d -aes-256-cbc -pbkdf2 -iter 10000 `
+            -pass "pass:$Key" -in $inFile -out $outFile 2>$null
+        if ($LASTEXITCODE -ne 0) { return $null }
+        return [System.IO.File]::ReadAllBytes($outFile)
+    } finally {
+        Remove-Item $inFile -ErrorAction SilentlyContinue
+        Remove-Item $outFile -ErrorAction SilentlyContinue
+    }
+}
+
+
 # Retrieval
+
+# Fetch ciphertext, decrypt, then save under its wcp-name header or print it.
+function Invoke-EncryptedRetrieve([string]$Url, [string]$Key, [string]$OutFile) {
+    $bodyFile = New-TempPath
+    try {
+        $status = & curl.exe -sSL -o $bodyFile -w '%{http_code}' $Url
+        if ([int]$status -ge 400) { return $false }
+        $plain = Unprotect-Bytes ([System.IO.File]::ReadAllText($bodyFile)) $Key
+        if ($null -eq $plain) {
+            Write-Error "wcp: could not decrypt - wrong key or corrupted upload"
+            exit 1
+        }
+        $nl = [Array]::IndexOf($plain, [byte]10)
+        $hdr = ""
+        if ($nl -gt 0) {
+            $hdr = [System.Text.Encoding]::UTF8.GetString($plain, 0, $nl)
+        }
+        if ($hdr.StartsWith("wcp-name:")) {
+            $target = $OutFile
+            if (-not $target) { $target = "./" + $hdr.Substring(9) }
+            $target = Get-UniqueSaveName $target
+            $rest = New-Object byte[] ($plain.Length - $nl - 1)
+            [Array]::Copy($plain, $nl + 1, $rest, 0, $rest.Length)
+            [System.IO.File]::WriteAllBytes($target, $rest)
+            Write-Output ("Saved as " + (Split-Path -Leaf $target))
+        } elseif ($OutFile) {
+            $target = Get-UniqueSaveName $OutFile
+            [System.IO.File]::WriteAllBytes($target, $plain)
+            Write-Output ("Saved to " + $target)
+        } else {
+            [Console]::Out.Write([System.Text.Encoding]::UTF8.GetString($plain))
+        }
+        return $true
+    } finally {
+        Remove-Item $bodyFile -ErrorAction SilentlyContinue
+    }
+}
 
 function Invoke-Retrieve([string]$Url, [string]$OverrideOut) {
     $hdrFile = [System.IO.Path]::GetTempFileName()
@@ -192,8 +294,9 @@ function Invoke-Retrieve([string]$Url, [string]$OverrideOut) {
         }
 
         if ($OverrideOut) {
-            Move-Item -Force $bodyFile $OverrideOut
-            Write-Output "Saved to $OverrideOut"
+            $outName = Get-UniqueSaveName $OverrideOut
+            Move-Item -Force $bodyFile $outName
+            Write-Output "Saved to $outName"
         } elseif ($ctype -like "text/*") {
             Get-Content -Raw $bodyFile
         } else {
@@ -220,7 +323,8 @@ Usage:
   Get-Content file | wcp         upload stdin
   wcp <code>                     retrieve; falls back to uploading on a miss
   wcp . <code>                   retrieve; errors on a miss
-  wcp get <code|url> [-o file]   retrieve explicitly
+  wcp . <code|url>               retrieve; errors on a miss
+  wcp <code|url> -o <file>       retrieve and save under a chosen name
 
 Options:
   -b, --backend <name>   litterbox (default) or catbox; -b l / -b c also work
@@ -248,6 +352,10 @@ $UploadHost = ""
 $DoCopy = $false
 $Plain = $false
 $DoPaste = $false
+$OutFile = $null
+$KeyLen = 12
+$ForceEncrypt = $false
+if ($env:WCP_KEY_LEN) { $KeyLen = [int]$env:WCP_KEY_LEN }
 $rest = @()
 
 $i = 0
@@ -289,14 +397,17 @@ while ($i -lt $args.Count) {
         $DoCopy = $true; $i += 1
     } elseif ($a -eq "-v" -or $a -eq "--paste") {
         $DoPaste = $true; $i += 1
+    } elseif ($a -eq "-k" -or $a -eq "--key-len") {
+        $KeyLen = [int]$args[$i + 1]; $i += 2
+    } elseif ($a -eq "-o" -or $a -eq "--output") {
+        $OutFile = $args[$i + 1]; $i += 2
     } elseif ($a -eq "-h" -or $a -eq "--help") {
         Show-Usage
         exit 0
     } elseif ($a -eq "-p" -or $a -eq "--plain") {
         $Plain = $true; $i += 1
     } elseif ($a -eq "-e" -or $a -eq "--encrypt") {
-        Write-Error "wcp: -e is not yet supported in the PowerShell version"
-        exit 1
+        $ForceEncrypt = $true; $i += 1
     } else {
         $rest += $a; $i += 1
     }
@@ -306,10 +417,14 @@ if ($env:WCP_PLAIN -eq "1") { $Plain = $true }
 
 $LbTime = Convert-LitterboxTimeBucket $LbHours
 
-function Do-ExplicitRetrieve([string]$Code) {
-    if ($Code -cmatch '^[a-oA-O01][0-9a-zA-Z]{6}-[0-9a-zA-Z]+$') {
-        Write-Error "wcp: encrypted codes are not yet supported in the PowerShell version"
-        exit 1
+function Do-ExplicitRetrieve([string]$Code, [string]$OutFile) {
+    # An encrypted code is CODE-KEY; split on the first dash.
+    $encKey = $null
+    if ($Code -cmatch '^[a-oA-O01][0-9a-zA-Z]+-[0-9a-zA-Z]+$') {
+        Assert-OpenSsl
+        $dash = $Code.IndexOf("-")
+        $encKey = $Code.Substring($dash + 1)
+        $Code = $Code.Substring(0, $dash)
     }
     $letter = $Code.Substring(0, 1)
 
@@ -354,9 +469,17 @@ function Do-ExplicitRetrieve([string]$Code) {
     }
 
     $fetchUrl = "$($fetchHost.TrimEnd('/'))/$DecodeId"
-    if (-not (Invoke-Retrieve $fetchUrl $null)) {
+    $ok = $false
+    if ($encKey) {
+        $ok = Invoke-EncryptedRetrieve $fetchUrl $encKey $OutFile
+    } else {
+        $ok = Invoke-Retrieve $fetchUrl $OutFile
+    }
+    if (-not $ok) {
         Write-Error "wcp: no such code '$Code' ($backendName, $extStr)"
-        Write-Error "wcp: $backendName codes expire - the default window is 1h"
+        if ($backendName -eq "litterbox") {
+            Write-Error "wcp: litterbox codes expire - the default window is 1h"
+        }
         return $false
     }
     return $true
@@ -365,54 +488,26 @@ function Do-ExplicitRetrieve([string]$Code) {
 
 # Explicit Retrieval
 
-# Check for encrypted code (contains '-')
-if ($rest.Count -gt 1 -and $rest[1].Contains("-")) {
-    Write-Error "wcp: encrypted codes are not yet supported in the PowerShell version"
-    exit 1
-}
-
+# A leading dot, or -o on its own, both mean an explicit retrieval.
+$target = $null
 if ($rest.Count -gt 0 -and $rest[0] -eq ".") {
     if ($rest.Count -lt 2) {
-        Write-Error "wcp: . needs a code, e.g. wcp . b0ojyr4"
+        Write-Error "wcp: . needs a code or URL, e.g. wcp . b0ojyr4"
         exit 1
     }
-    if (-not (Do-ExplicitRetrieve $rest[1])) {
-        exit 1
-    }
-    exit 0
+    $target = $rest[1]
+} elseif ($OutFile -and $rest.Count -eq 1) {
+    $target = $rest[0]
 }
 
-if ($rest.Count -gt 0 -and $rest[0] -eq "get") {
-    # Check for encrypted code in get form
-    for ($j = 1; $j -lt $rest.Count; $j++) {
-        $tok = $rest[$j]
-        if ($tok -ne "-o" -and $tok -ne "--output" -and $tok.Contains("-")) {
-            Write-Error "wcp: encrypted codes are not supported in this build"
-            exit 1
-        }
-    }
-    $OutFile = $null
-    $Url = $null
-    $j = 1
-    while ($j -lt $rest.Count) {
-        if ($rest[$j] -eq "-o" -or $rest[$j] -eq "--output") {
-            $OutFile = $rest[$j + 1]; $j += 2
-        } else {
-            $Url = $rest[$j]; $j += 1
-        }
-    }
-    if ([string]::IsNullOrEmpty($Url)) {
-        Write-Error "Usage: wcp get <url|code> [-o outputfile]"
-        exit 1
-    }
-    # Distinguish URL from code by scheme
-    if ($Url -match '^https?://') {
-        if (-not (Invoke-Retrieve $Url $OutFile)) {
-            Write-Error "wcp: failed to fetch $Url"
+if ($target) {
+    if ($target -match '^https?://') {
+        if (-not (Invoke-Retrieve $target $OutFile)) {
+            Write-Error ("wcp: failed to fetch " + $target)
             exit 1
         }
     } else {
-        if (-not (Do-ExplicitRetrieve $Url)) {
+        if (-not (Do-ExplicitRetrieve $target $OutFile)) {
             exit 1
         }
     }
@@ -423,16 +518,12 @@ if ($rest.Count -gt 0 -and $rest[0] -eq "get") {
 # Short Code Retrieval
 
 if ($rest.Count -eq 1 -and -not (Test-Path -LiteralPath $rest[0] -PathType Leaf)) {
-    if ($rest[0].Contains("-")) {
-        Write-Error "wcp: encrypted codes are not yet supported in the PowerShell version"
-        exit 1
-    }
     $Candidate = $rest[0]
     $Letter = $Candidate.Substring(0, 1)
     $RestPart = $Candidate.Substring(1)
 
-    if ($Candidate -cmatch '^[a-oA-O01][0-9a-zA-Z]{6}-[0-9a-zA-Z]+$') {
-        Write-Error "wcp: encrypted codes are not yet supported in the PowerShell version"
+    if ($Candidate -cmatch '^[a-oA-O01][0-9a-zA-Z]+-[0-9a-zA-Z]+$') {
+        if (Do-ExplicitRetrieve $Candidate $OutFile) { exit 0 }
         exit 1
     }
 
@@ -450,7 +541,7 @@ if ($rest.Count -eq 1 -and -not (Test-Path -LiteralPath $rest[0] -PathType Leaf)
                 exit 0
             }
         } elseif ($Candidate.Contains(".")) {
-            # Backward-compat old-format code
+            # Code carrying a literal extension after an a/c prefix.
             $FetchHost = $DefaultFetchHostLitterbox
             if ($UploadHost) {
                 $FetchHost = $UploadHost
@@ -557,22 +648,71 @@ if ($DoPaste) {
     $PasteContent = $clip
 }
 
-if (-not $Plain -and $Backend -ne "litterbox") {
-    Write-Error "wcp: $Backend uploads are encrypted by default, which this build"
-    Write-Error "wcp: does not support. Use --plain (-p) to upload without it."
-    Write-Error "wcp: use --plain (-p) to upload without encryption"
+if ($KeyLen -lt 12 -or $KeyLen -gt 64) {
+    Write-Error "wcp: --key-len must be a whole number from 12 to 64 (default 12)"
     exit 1
 }
 
-if ($DoPaste) {
-    $result = Dispatch "text" $PasteContent
-} elseif ($rest.Count -eq 0 -or ($rest.Count -eq 1 -and $rest[0] -eq "-")) {
-    $result = Dispatch "stdin" ""
-} elseif ($rest.Count -eq 1 -and (Test-Path -LiteralPath $rest[0] -PathType Leaf)) {
-    $result = Dispatch "file" $rest[0]
+# Select the encryption mode for this upload.
+$MaxEncSize = 1048576
+$Encrypt = $false
+if ($Plain) {
+    $Encrypt = $false
+} elseif ($ForceEncrypt) {
+    Assert-OpenSsl
+    $Encrypt = $true
+} elseif ($Backend -eq "litterbox") {
+    $Encrypt = $false
+} elseif ($OpenSslPath) {
+    $Encrypt = $true
 } else {
-    $text = $rest -join ' '
-    $result = Dispatch "text" $text
+    Write-Error "wcp: openssl not found - uploading to $Backend UNENCRYPTED"
+    Write-Error "wcp: install openssl, or pass --plain (-p) to silence this"
+}
+
+$key = $null
+$result = $null
+
+if ($Encrypt) {
+    $plain = $null
+    if ($DoPaste) {
+        $plain = [System.Text.Encoding]::UTF8.GetBytes($PasteContent)
+    } elseif ($rest.Count -eq 0 -or ($rest.Count -eq 1 -and $rest[0] -eq "-")) {
+        $plain = [System.Text.Encoding]::UTF8.GetBytes([Console]::In.ReadToEnd())
+    } elseif ($rest.Count -eq 1 -and (Test-Path -LiteralPath $rest[0] -PathType Leaf)) {
+        $fp = $rest[0]
+        $bn = Split-Path -Leaf $fp
+        if ((Get-Item -LiteralPath $fp).Length -gt $MaxEncSize) {
+            $msg = " - over the 1 MB limit, uploading as-is"
+            Write-Error ("wcp: not encrypting " + $bn + $msg)
+            $Encrypt = $false
+        } else {
+            $hdr = [System.Text.Encoding]::UTF8.GetBytes("wcp-name:$bn`n")
+            $body = [System.IO.File]::ReadAllBytes($fp)
+            $plain = New-Object byte[] ($hdr.Length + $body.Length)
+            [Array]::Copy($hdr, 0, $plain, 0, $hdr.Length)
+            [Array]::Copy($body, 0, $plain, $hdr.Length, $body.Length)
+        }
+    } else {
+        $plain = [System.Text.Encoding]::UTF8.GetBytes(($rest -join ' '))
+    }
+
+    if ($Encrypt) {
+        $key = New-WcpKey $KeyLen
+        $result = Dispatch "text" (Protect-Bytes $plain $key)
+    }
+}
+
+if (-not $result) {
+    if ($DoPaste) {
+        $result = Dispatch "text" $PasteContent
+    } elseif ($rest.Count -eq 0 -or ($rest.Count -eq 1 -and $rest[0] -eq "-")) {
+        $result = Dispatch "stdin" ""
+    } elseif ($rest.Count -eq 1 -and (Test-Path -LiteralPath $rest[0] -PathType Leaf)) {
+        $result = Dispatch "file" $rest[0]
+    } else {
+        $result = Dispatch "text" ($rest -join ' ')
+    }
 }
 
 if ($result -notmatch '^https?://\S+$') {
@@ -587,6 +727,9 @@ if ($result -notmatch '^https?://\S+$') {
 
 $idFull = Get-IdFromUrl $result
 $code = Encode-Id $idFull $Backend
+if ($key) {
+    $code = $code + "-" + $key
+}
 
 Write-Output $code
 

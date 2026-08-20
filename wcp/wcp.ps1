@@ -477,7 +477,9 @@ if ([string]::IsNullOrEmpty($UploadHost)) { $UploadHost = $DefaultHost }
 $UploadHost = $UploadHost.TrimEnd('/')
 
 function Write-TempFile([string]$Content) {
-    $tmp = [System.IO.Path]::GetTempFileName()
+    # Name it .txt so the backend serves it as text, not binary.
+    $stamp = [Guid]::NewGuid().ToString('N').Substring(0, 8)
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('wcp-' + $stamp + '.txt')
     $enc = [System.Text.UTF8Encoding]::new($false)
     [System.IO.File]::WriteAllText($tmp, $Content, $enc)
     return $tmp

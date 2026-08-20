@@ -42,8 +42,19 @@
 
 $ErrorActionPreference = "Stop"
 
+# Capture pipeline input now; $input is only live at script entry.
+$PipelineInput = @($input)
+
 # Sync .NET's cwd with PowerShell's for relative paths discovery
 [System.IO.Directory]::SetCurrentDirectory($PWD.Path)
+
+# A piped-to .ps1 gets objects in $input; a piped-to .cmd gets real stdin.
+function Read-PipedInput {
+    if ($PipelineInput.Count -gt 0) {
+        return ($PipelineInput -join [Environment]::NewLine)
+    }
+    return [Console]::In.ReadToEnd()
+}
 
 $DefaultUploadHostCatbox = "https://catbox.moe/user/api.php"
 $DefaultFetchHostCatbox = "https://files.catbox.moe"
@@ -603,7 +614,7 @@ function Upload-Catbox([string]$Kind, [string]$Arg) {
             finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
         }
         "stdin" {
-            $content = [Console]::In.ReadToEnd()
+            $content = Read-PipedInput
             $tmp = Write-TempFile $content
             try {
                 return & curl.exe -sS -F "reqtype=fileupload" `
@@ -629,7 +640,7 @@ function Upload-Litterbox([string]$Kind, [string]$Arg) {
             finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
         }
         "stdin" {
-            $content = [Console]::In.ReadToEnd()
+            $content = Read-PipedInput
             $tmp = Write-TempFile $content
             try {
                 return & curl.exe -sS -F "reqtype=fileupload" -F "time=$LbTime" `
@@ -671,11 +682,15 @@ $Encrypt = $false
 if ($Plain) {
     $Encrypt = $false
 } elseif ($ForceEncrypt) {
-    Write-Error "wcp: encryption is on by default and is not yet supported in the PowerShell version — use --plain"
-    exit 1
+    Assert-OpenSsl
+    $Encrypt = $true
+} elseif ($Backend -eq "litterbox") {
+    $Encrypt = $false
+} elseif ($OpenSslPath) {
+    $Encrypt = $true
 } else {
-    Write-Error "wcp: encryption is on by default and is not yet supported in the PowerShell version — use --plain"
-    exit 1
+    Write-Error "wcp: openssl not found - uploading to $Backend UNENCRYPTED"
+    Write-Error "wcp: install openssl, or pass --plain (-p) to silence this"
 }
 
 $key = $null
@@ -686,7 +701,7 @@ if ($Encrypt) {
     if ($DoPaste) {
         $plain = [System.Text.Encoding]::UTF8.GetBytes($PasteContent)
     } elseif ($rest.Count -eq 0 -or ($rest.Count -eq 1 -and $rest[0] -eq "-")) {
-        $plain = [System.Text.Encoding]::UTF8.GetBytes([Console]::In.ReadToEnd())
+        $plain = [System.Text.Encoding]::UTF8.GetBytes((Read-PipedInput))
     } elseif ($rest.Count -eq 1 -and (Test-Path -LiteralPath $rest[0] -PathType Leaf)) {
         $fp = $rest[0]
         $bn = Split-Path -Leaf $fp

@@ -94,6 +94,14 @@ $dstPs1 = Join-Path $binDir 'wcp.ps1'
 Copy-Item -LiteralPath $srcPs1 -Destination $dstPs1 -Force
 Write-Output ('Installed: ' + $dstPs1)
 
+# Install tests.md alongside wcp.
+$srcTests = Join-Path $srcDir 'tests.md'
+if (Test-Path -LiteralPath $srcTests) {
+    $dstTests = Join-Path $binDir 'tests.md'
+    Copy-Item -LiteralPath $srcTests -Destination $dstTests -Force
+    Write-Output ('Installed: ' + $dstTests)
+}
+
 # Launcher so 'wcp' works without typing .ps1.
 $dstCmd = Join-Path $binDir 'wcp.cmd'
 $cmdLines = @(

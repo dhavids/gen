@@ -288,11 +288,20 @@ function Describe-Reply([string]$Reply) {
 function Invoke-TestSheet([string]$Sheet) {
     if (-not $Sheet) {
         $here = Split-Path -Parent $PSCommandPath
-        $Sheet = Join-Path $here 'tests.md'
+        $beside = Join-Path $here 'tests.md'
+        $here2 = Join-Path $PWD.Path 'tests.md'
+        if (Test-Path -LiteralPath $beside) {
+            $Sheet = $beside
+        } elseif (Test-Path -LiteralPath $here2) {
+            $Sheet = $here2
+        } else {
+            Warn "wcp: no tests.md beside wcp or in this directory"
+            Warn "wcp: pass one explicitly: wcp --run-tests <file.md>"
+            return 1
+        }
     }
     if (-not (Test-Path -LiteralPath $Sheet)) {
-        Warn "wcp: no test sheet at $Sheet"
-        Warn "wcp: pass one explicitly: wcp --run-tests <file.md>"
+        Warn "wcp: cannot read $Sheet"
         return 1
     }
 

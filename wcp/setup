@@ -145,6 +145,12 @@ install_unix() {
     chmod +x "$target"
     print_info "Installed: $target"
 
+    # Install tests.md alongside wcp.
+    if [ -r "$SCRIPT_DIR/tests.md" ]; then
+        cp "$SCRIPT_DIR/tests.md" "$(dirname "$target")/tests.md"
+        print_info "Installed: $(dirname "$target")/tests.md"
+    fi
+
     case ":$PATH:" in
         *":$(dirname "$target"):"*) ;;
         *) add_to_path "$(dirname "$target")" ;;

@@ -374,11 +374,19 @@ human_size() {
 run_tests() {
   local sheet="${1:-}"
   if [[ -z "$sheet" ]]; then
-    sheet="$(dirname "$(readlink -f "$0")")/tests.md"
+    local beside="$(dirname "$(readlink -f "$0")")/tests.md"
+    if [[ -r "$beside" ]]; then
+      sheet="$beside"
+    elif [[ -r "./tests.md" ]]; then
+      sheet="./tests.md"
+    else
+      print_error "no tests.md beside wcp or in this directory"
+      print_error "pass one explicitly: wcp --run-tests <file.md>"
+      return 1
+    fi
   fi
   if [[ ! -r "$sheet" ]]; then
-    print_error "no test sheet at $sheet"
-    print_error "pass one explicitly: wcp --run-tests <file.md>"
+    print_error "cannot read $sheet"
     return 1
   fi
 

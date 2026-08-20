@@ -304,9 +304,11 @@ function Invoke-TestSheet([string]$Sheet) {
     # The key and the buffer both hang off LOCALAPPDATA, so moving it moves both
     # and the real ones are never touched.
     $oldLocal = $env:LOCALAPPDATA
+    $oldCache = $env:XDG_CACHE_HOME
     $oldNoCopy = $env:WCP_NO_COPY
     $oldPwd = $PWD.Path
     $env:LOCALAPPDATA = $sandbox
+    $env:XDG_CACHE_HOME = $sandbox
     $env:WCP_NO_COPY = '1'
     Set-Location -LiteralPath $work
 
@@ -362,6 +364,7 @@ function Invoke-TestSheet([string]$Sheet) {
 
     Set-Location -LiteralPath $oldPwd
     $env:LOCALAPPDATA = $oldLocal
+    $env:XDG_CACHE_HOME = $oldCache
     $env:WCP_NO_COPY = $oldNoCopy
     Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
 
@@ -715,10 +718,9 @@ $DoGetKey = $false
 $DoClearKey = $false
 $MinStoredKey = 20
 $KeyPath = Join-Path (Join-Path $env:LOCALAPPDATA 'wcp') 'key'
-$BufferPath = Join-Path (
-    if ($env:XDG_CACHE_HOME) { $env:XDG_CACHE_HOME }
-    else { Join-Path $env:LOCALAPPDATA 'wcp' }
-) 'buffer'
+$CacheRoot = $env:XDG_CACHE_HOME
+if (-not $CacheRoot) { $CacheRoot = $env:LOCALAPPDATA }
+$BufferPath = Join-Path (Join-Path $CacheRoot 'wcp') 'buffer'
 if ($env:WCP_KEY_LEN) { $KeyLen = [int]$env:WCP_KEY_LEN }
 $rest = @()
 

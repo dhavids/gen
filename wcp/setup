@@ -39,6 +39,71 @@ OS="$(detect_os)"
 echo "Detected: $OS"
 echo ""
 
+# Markers wrapping anything this script writes into a shell profile, so an
+# uninstaller can delete exactly this block and leave the rest of the file alone.
+WCP_BEGIN="# >>> wcp >>>"
+WCP_END="# <<< wcp <<<"
+
+# The profile file the user's login shell actually reads.
+profile_file() {
+    case "$(basename "${SHELL:-}")" in
+        zsh)  echo "$HOME/.zshrc" ;;
+        bash)
+            if [ -f "$HOME/.bashrc" ]; then
+                echo "$HOME/.bashrc"
+            else
+                echo "$HOME/.bash_profile"
+            fi
+            ;;
+        *)    echo "$HOME/.profile" ;;
+    esac
+}
+
+add_to_path() {
+    local dir="$1"
+    local profile reply
+    profile="$(profile_file)"
+
+    if [ -f "$profile" ] && grep -qF "$WCP_BEGIN" "$profile"; then
+        echo "$profile already has a wcp block — leaving it alone."
+        return 0
+    fi
+
+    echo ""
+    echo "NOTE: $dir is not in your PATH."
+
+    # Never prompt when there is no one to answer; a setup run from a pipe or
+    # CI should print instructions rather than hang.
+    if [ ! -t 0 ]; then
+        echo "Not running interactively, so $profile was not modified."
+        echo "Add this to your shell profile:"
+        echo "  export PATH=\"\$PATH:$dir\""
+        return 0
+    fi
+
+    read -rp "Add it to $profile automatically? [y/N] " reply || reply=""
+    case "$reply" in
+        [Yy]*) ;;
+        *)
+            echo "Skipped. Add this yourself when you want it:"
+            echo "  export PATH=\"\$PATH:$dir\""
+            return 0
+            ;;
+    esac
+
+    {
+        echo ""
+        echo "$WCP_BEGIN"
+        echo "# Added by the wcp setup script. To remove, delete this line"
+        echo "# through the matching '<<< wcp <<<' line below."
+        echo "export PATH=\"\$PATH:$dir\""
+        echo "$WCP_END"
+    } >> "$profile"
+
+    echo "Added to $profile, wrapped in $WCP_BEGIN / $WCP_END markers."
+    echo "Run 'source $profile' or open a new terminal to pick it up."
+}
+
 install_unix() {
     local target=""
     if [ -w /usr/local/bin ] || [ "$(id -u)" = "0" ]; then
@@ -57,10 +122,7 @@ install_unix() {
             echo "$(dirname "$target") is already in your PATH — you can run 'wcp' directly."
             ;;
         *)
-            echo ""
-            echo "NOTE: $(dirname "$target") is not in your PATH yet."
-            echo "Add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
-            echo "  export PATH=\"\$PATH:$(dirname "$target")\""
+            add_to_path "$(dirname "$target")"
             ;;
     esac
 }

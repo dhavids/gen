@@ -2,59 +2,172 @@
 # wcp — minimal upload wrapper with a compact roundtrip code.
 #
 # USAGE:
-#   wcp path/to/file.txt        # upload -> prints a short code, e.g. "aAbCd.txt"
+#   wcp path/to/file.txt        # upload -> prints a short code, e.g. "brbkswy"
 #   wcp some words here         # not a file -> uploaded as text, prints a code
 #   echo "text" | wcp           # no args -> reads stdin, prints a code
-#   wcp aAbCd.txt                # retrieve: decodes backend + id from the code
-#                                #   text  -> printed to stdout
-#                                #   file  -> saved in the current folder with
-#                                #            its original filename
+#   wcp brbkswy                 # retrieve (implicit): may fall back to uploading
+#   wcp . brbkswy               # retrieve (explicit): errors instead of falling back
+#   wcp get brbkswy             # retrieve (explicit): same as above
 #   wcp get <full-url> [-o file] # retrieve by a full URL instead of a code
 #
-# The first character of the printed code is the backend letter; everything
-# after it is that backend's own ID for the upload:
-#   a = 0x0          (default fetch host https://0x0.st)
-#   b = transfer.sh  (default fetch host https://transfer.sh)
-#   c = catbox       (default fetch host https://files.catbox.moe — note this
-#                     differs from catbox's upload endpoint, catbox.moe)
+# Retrieved text prints to stdout; retrieved files are saved into the current
+# folder. Existing files are never overwritten — _1, _2 are appended and the
+# name actually used is printed. Encrypted files restore their original name.
 #
-# --backend / --host work for both directions: on upload they choose/override
+# The first character of the printed code encodes BOTH the backend and the
+# file extension. Lowercase a-o = litterbox, uppercase A-O = catbox.
+# Digits 0/1 mean the extension is not in the built-in table (the literal
+# .ext follows the prefix). A typical code is 7 characters long.
+# Letters p-z, P-Z and digits 2-9 are reserved for a future third backend.
+#
+# Old-format codes with a literal extension (e.g. aAbCd.txt, c96k8z8.txt)
+# still resolve correctly for backward compatibility.
+#
+# -b / --backend and --host work for both directions: on upload they choose
 # which service and endpoint is used; on retrieval, --host overrides the
-# default fetch host for the decoded backend letter (useful if you uploaded
-# via a self-hosted instance and need to fetch from that same instance).
+# default fetch host for the decoded backend.
 #
-# Collision handling: a single word that happens to start with a known
-# backend letter (e.g. `wcp aeroplane`) looks like a code. wcp tries
-# retrieval first; if that 404s, it falls back to uploading the word as text.
+# -t [hours] takes a whole number of hours and rounds UP to the nearest of
+# 1h, 12h, 24h, 72h (litterbox only; catbox never expires). Max 72h.
+#
+# Env vars: WCP_BACKEND (default: litterbox), WCP_TIME (whole hours, default 1)
+#
+# Collision handling: a candidate of 7 chars or fewer that looks like a code is
+# tried as a retrieval first; if that 404s it falls back to uploading it as
+# text. Longer candidates are only tried if they contain a . or a - (escape and
+# old-format codes carry a dot, encrypted codes a dash), so an ordinary long
+# word is uploaded straight away with no wasted request.
+#
+# Encryption default depends on the backend: litterbox uploads are plain
+# (they expire, so exposure is short); every other backend is encrypted.
+# -e / --encrypt forces it on; --plain / -p and WCP_PLAIN=1 force it off.
+# Encrypted codes use a 12-char alphanumeric key: CODE-KEY (~20 chars total).
+# The KEY is NEVER uploaded — only the ciphertext goes to the server.
+# Losing the KEY loses the data permanently.
+#   wcp -b c hello world -> B0ojyr4-AbCdEfGhIjKl
+# openssl is needed only when encrypting; the litterbox default does not use it.
+# Files are encrypted only if text and <= 100 KB; others upload as-is with a warning.
+# Short aliases: -b backend, -c copy, -e encrypt, -p plain, -t time.
 set -euo pipefail
 
-DEFAULT_UPLOAD_HOST_0X0="https://0x0.st"
-DEFAULT_UPLOAD_HOST_TRANSFERSH="https://transfer.sh"
 DEFAULT_UPLOAD_HOST_CATBOX="https://catbox.moe/user/api.php"
-DEFAULT_FETCH_HOST_0X0="https://0x0.st"
-DEFAULT_FETCH_HOST_TRANSFERSH="https://transfer.sh"
 DEFAULT_FETCH_HOST_CATBOX="https://files.catbox.moe"
+DEFAULT_UPLOAD_HOST_LITTERBOX="https://litterbox.catbox.moe/resources/internals/api.php"
+DEFAULT_FETCH_HOST_LITTERBOX="https://litter.catbox.moe"
+DEFAULT_LITTERBOX_TIME="1h"
 
-letter_for_backend() {
-  case "$1" in
-    0x0) echo "a" ;;
-    transfer.sh) echo "b" ;;
-    catbox) echo "c" ;;
-  esac
+# Extension table: index 0 = no extension, 1..14 = common extensions.
+EXT_TABLE=( "" txt md log json yaml csv conf sh py png jpg pdf zip gz )
+
+encode_id() {
+  local id_full="$1" backend="$2"
+  local id_base ext prefix
+
+  # Split on the LAST dot
+  if [[ "$id_full" == *.* ]]; then
+    ext="${id_full##*.}"
+    id_base="${id_full%.*}"
+  else
+    id_base="$id_full"
+    ext=""
+  fi
+
+  # Look up ext in EXT_TABLE
+  local found=0 i
+  for i in "${!EXT_TABLE[@]}"; do
+    if [[ "${EXT_TABLE[$i]}" == "$ext" ]]; then
+      found=1
+      if [[ "$backend" == "catbox" ]]; then
+        # uppercase: A=0, B=1, ...
+        printf -v prefix '%b' "\\$(printf '%03o' $((65 + i)))"
+      else
+        # lowercase: a=0, b=1, ...
+        printf -v prefix '%b' "\\$(printf '%03o' $((97 + i)))"
+      fi
+      echo "${prefix}${id_base}"
+      return
+    fi
+  done
+
+  # Not found: use 0 for litterbox, 1 for catbox, keep literal .ext
+  if [[ "$backend" == "catbox" ]]; then
+    echo "1${id_base}.${ext}"
+  else
+    echo "0${id_base}.${ext}"
+  fi
 }
 
-default_fetch_host_for_letter() {
-  case "$1" in
-    a) echo "$DEFAULT_FETCH_HOST_0X0" ;;
-    b) echo "$DEFAULT_FETCH_HOST_TRANSFERSH" ;;
-    c) echo "$DEFAULT_FETCH_HOST_CATBOX" ;;
-    *) return 1 ;;
-  esac
+decode_code() {
+  local candidate="$1"
+  local letter="${candidate:0:1}"
+  local rest="${candidate:1}"
+
+  # 2.1 Backward compatibility: old-format codes with a literal dot
+  if [[ "$letter" == "a" || "$letter" == "c" ]] && [[ "$rest" == *.* ]]; then
+    if [[ "$letter" == "a" ]]; then
+      DECODED_BACKEND="litterbox"
+    else
+      DECODED_BACKEND="catbox"
+    fi
+    DECODED_ID="$rest"
+    return 0
+  fi
+
+  # 2.2 Digit prefix: unlisted extension, REST has literal .ext
+  if [[ "$letter" == "0" || "$letter" == "1" ]]; then
+    if [[ "$letter" == "0" ]]; then
+      DECODED_BACKEND="litterbox"
+    else
+      DECODED_BACKEND="catbox"
+    fi
+    DECODED_ID="$rest"
+    return 0
+  fi
+
+  # 2.3 Alphabetic prefix: lookup extension in table
+  local i
+  if [[ "$letter" =~ [a-z] ]]; then
+    DECODED_BACKEND="litterbox"
+    i=$(( $(printf '%d' "'$letter") - 97 ))
+  elif [[ "$letter" =~ [A-Z] ]]; then
+    DECODED_BACKEND="catbox"
+    i=$(( $(printf '%d' "'$letter") - 65 ))
+  else
+    return 1
+  fi
+
+  if [[ $i -lt 0 || $i -ge ${#EXT_TABLE[@]} ]]; then
+    return 1
+  fi
+
+  local ext="${EXT_TABLE[$i]}"
+  if [[ -z "$ext" ]]; then
+    DECODED_ID="$rest"
+  else
+    DECODED_ID="${rest}.${ext}"
+  fi
+  return 0
+}
+
+litterbox_time_bucket() {
+  local h="${1%h}"
+  if [[ ! "$h" =~ ^[0-9]+$ ]] || [[ "$h" -lt 1 ]]; then
+    echo "wcp: -t takes a whole number of hours, 1 to 72" >&2
+    return 1
+  fi
+  if   [[ "$h" -le 1  ]]; then echo "1h"
+  elif [[ "$h" -le 12 ]]; then echo "12h"
+  elif [[ "$h" -le 24 ]]; then echo "24h"
+  elif [[ "$h" -le 72 ]]; then echo "72h"
+  else
+    echo "wcp: -t max is 72 hours (litterbox allows 1, 12, 24, 72)" >&2
+    return 1
+  fi
 }
 
 # Strip "scheme://host" off a URL, leaving just the path (the "id"),
-# regardless of which host actually issued it. Works for all three
-# backends' real response shapes, including catbox's cross-domain quirk.
+# regardless of which host actually issued it. Works for both backends'
+# real response shapes, including catbox's cross-domain quirk.
 strip_host() {
   local url="$1"
   url="${url#https://}"
@@ -64,6 +177,7 @@ strip_host() {
 }
 
 # --- retrieval: given a full URL, print (text) or save (file) --------------
+
 retrieve_url() {
   local url="$1"
   local override_out="${2:-}"
@@ -83,55 +197,186 @@ retrieve_url() {
     mv "$bodyfile" "$override_out"
     echo "Saved to $override_out"
   elif [[ "$ctype" == text/* ]]; then
-    cat "$bodyfile"
+    emit_text "$bodyfile"
     rm -f "$bodyfile"
   else
     local fname
     fname="$(basename "$url")"
     [[ -z "$fname" || "$fname" == "/" ]] && fname="downloaded_file"
-    mv "$bodyfile" "./$fname"
-    echo "Saved as $fname"
+    local save_name
+    save_name="$(unique_save_name "./$fname")"
+    mv "$bodyfile" "$save_name"
+    echo "Saved as $(basename "$save_name")"
   fi
   rm -f "$hdrfile"
   return 0
 }
 
-# --- "get" subcommand: fetch back a URL directly ----------------------------
-if [[ "${1:-}" == "get" ]]; then
-  shift
-  OUTFILE=""
-  URL=""
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      -o|--output) OUTFILE="$2"; shift 2 ;;
-      *) URL="$1"; shift ;;
-    esac
+# --- helper functions -------------------------------------------------------
+
+# Print retrieved text. On a terminal, add a trailing newline when the content
+# lacks one, so the shell prompt starts on its own line. When redirected or
+# piped, emit the bytes untouched — round-trips must stay byte-exact.
+emit_text() {
+  local f="$1"
+  cat "$f"
+  if [[ -t 1 && -s "$f" && $(tail -c1 "$f" | wc -l) -eq 0 ]]; then
+    echo
+  fi
+}
+
+code_not_found() {
+  local code="$1" backend="$2" ext="$3"
+  echo "wcp: no such code '${code}' (${backend}, ${ext:-no extension})" >&2
+  if [[ "$backend" == "litterbox" ]]; then
+    echo "wcp: litterbox codes expire — the default window is 1h" >&2
+  fi
+}
+
+check_openssl() {
+  if ! command -v openssl &>/dev/null; then
+    echo "wcp: -e needs openssl, which was not found on this system" >&2
+    echo "wcp: install it (e.g. apt install openssl) or drop -e" >&2
+    exit 1
+  fi
+}
+
+encrypt_content() {
+  local key="$1"
+  openssl enc -aes-256-cbc -pbkdf2 -iter 10000 -salt -pass "pass:$key" | base64 -w0
+}
+
+decrypt_content() {
+  local key="$1"
+  base64 -d | openssl enc -d -aes-256-cbc -pbkdf2 -iter 10000 -pass "pass:$key"
+}
+
+is_text_file() {
+  local f="$1"
+  if command -v file &>/dev/null; then
+    local mime
+    mime="$(file -b --mime-type "$f")"
+    [[ "$mime" == text/* ]]
+  else
+    return 1
+  fi
+}
+
+human_size() {
+  local bytes="$1"
+  if [[ $bytes -ge 1048576 ]]; then
+    echo "$(( bytes / 1048576 )) MB"
+  elif [[ $bytes -ge 1024 ]]; then
+    echo "$(( (bytes + 512) / 1024 )) KB"
+  else
+    echo "${bytes} B"
+  fi
+}
+
+# Generate a unique filename by appending _1, _2, etc. before the extension.
+# The LAST dot separates the extension: archive.tar.gz -> archive.tar_1.gz
+unique_save_name() {
+  local base="$1"
+  if [[ ! -e "$base" ]]; then
+    echo "$base"
+    return
+  fi
+  local name ext
+  if [[ "$base" == *.* ]]; then
+    ext="${base##*.}"
+    name="${base%.*}"
+  else
+    ext=""
+    name="$base"
+  fi
+  local i=1
+  while true; do
+    local candidate
+    if [[ -n "$ext" ]]; then
+      candidate="${name}_${i}.${ext}"
+    else
+      candidate="${name}_${i}"
+    fi
+    if [[ ! -e "$candidate" ]]; then
+      echo "$candidate"
+      return
+    fi
+    i=$((i + 1))
   done
-  if [[ -z "$URL" ]]; then
-    echo "Usage: wcp get <url> [-o outputfile]" >&2
-    exit 1
+}
+
+KEY_LEN=12
+
+# Build a key from an explicit [A-Za-z0-9] whitelist. tr -dc keeps only those
+# characters, so the alphabet holds by construction rather than by inspection,
+# and the loop guarantees the length even if a draw is filtered heavily.
+# The final check makes the invariant fail loudly instead of silently.
+gen_key() {
+  local k=""
+  while [[ ${#k} -lt $KEY_LEN ]]; do
+    k="${k}$(openssl rand -base64 48 | LC_ALL=C tr -dc 'A-Za-z0-9')"
+  done
+  k="${k:0:$KEY_LEN}"
+  if [[ ${#k} -ne $KEY_LEN ]] || [[ "$k" =~ [^A-Za-z0-9] ]]; then
+    echo "wcp: internal error — generated key failed its format check" >&2
+    return 1
   fi
-  if ! retrieve_url "$URL" "$OUTFILE"; then
-    echo "Failed to fetch $URL" >&2
-    exit 1
+  printf '%s' "$k"
+}
+
+# Decrypt a fetched body, then either save it under its original name
+# (wcp-name header) or print it. Works through files, never command
+# substitution, which would strip trailing newlines from the payload.
+decrypt_and_emit() {
+  local key="$1" bodyfile="$2"
+  local plainfile first_line fname save_name
+  plainfile="$(mktemp /tmp/wcp-dec.XXXXXX)"
+  if ! decrypt_content "$key" < "$bodyfile" > "$plainfile" 2>/dev/null; then
+    rm -f "$plainfile"
+    echo "wcp: could not decrypt — the key may be wrong or the upload corrupted" >&2
+    return 1
   fi
-  exit 0
-fi
+  IFS= read -r first_line < "$plainfile" || first_line=""
+  if [[ "$first_line" == wcp-name:* ]]; then
+    fname="${first_line#wcp-name:}"
+    save_name="$(unique_save_name "./$fname")"
+    tail -n +2 "$plainfile" > "$save_name"
+    echo "Saved as $(basename "$save_name")"
+  else
+    emit_text "$plainfile"
+  fi
+  rm -f "$plainfile"
+  return 0
+}
 
 # --- parse flags once, for both upload and retrieval paths ------------------
-BACKEND="0x0"
+
+BACKEND="${WCP_BACKEND:-litterbox}"
+LBHOURS="${WCP_TIME:-1}"
 HOST=""
 COPY=0
+PLAIN=0
+ENCRYPT=0
+EXPLICIT_ENCRYPT=0
 ARGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --backend)
-      BACKEND="$2"
+    -b|--backend)
+      case "$2" in
+        c|catbox)    BACKEND="catbox" ;;
+        l|litterbox) BACKEND="litterbox" ;;
+        *)           BACKEND="$2" ;;
+      esac
       shift 2
       ;;
     --backend=*)
-      BACKEND="${1#*=}"
+      val="${1#*=}"
+      case "$val" in
+        c|catbox)    BACKEND="catbox" ;;
+        l|litterbox) BACKEND="litterbox" ;;
+        *)           BACKEND="$val" ;;
+      esac
       shift
       ;;
     --host)
@@ -142,8 +387,24 @@ while [[ $# -gt 0 ]]; do
       HOST="${1#*=}"
       shift
       ;;
-    --copy)
+    -t|--time)
+      LBHOURS="$2"
+      shift 2
+      ;;
+    -t=*|--time=*)
+      LBHOURS="${1#*=}"
+      shift
+      ;;
+    -c|--copy)
       COPY=1
+      shift
+      ;;
+    -e|--encrypt)
+      EXPLICIT_ENCRYPT=1
+      shift
+      ;;
+    -p|--plain)
+      PLAIN=1
       shift
       ;;
     --)
@@ -158,37 +419,275 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# --- short-code retrieval: single token starting with a known backend ------
-# letter, at least 2 characters, and not an existing local file. Tries the
-# retrieval first; if it 404s (or any error), falls through to uploading the
-# original word as text instead (see collision note in the header comment).
+LBTIME="$(litterbox_time_bucket "$LBHOURS")"
+
+# WCP_PLAIN=1 env var also opts out of encryption
+if [[ "${WCP_PLAIN:-0}" == "1" ]]; then
+  PLAIN=1
+fi
+
+# Decide whether this upload gets encrypted.
+#   --plain wins outright
+#   -e forces it, and fails hard if openssl is missing
+#   litterbox defaults to plain: it expires, so the exposure window is short
+#   any other backend defaults to encrypted, degrading with a warning
+WARN_NO_OPENSSL=0
+if [[ $PLAIN -eq 1 ]]; then
+  ENCRYPT=0
+elif [[ $EXPLICIT_ENCRYPT -eq 1 ]]; then
+  if ! command -v openssl &>/dev/null; then
+    echo "wcp: -e needs openssl, which was not found on this system" >&2
+    echo "wcp: install it (e.g. apt install openssl) or use --plain" >&2
+    exit 1
+  fi
+  ENCRYPT=1
+elif [[ "$BACKEND" == "litterbox" ]]; then
+  ENCRYPT=0
+elif command -v openssl &>/dev/null; then
+  ENCRYPT=1
+else
+  ENCRYPT=0
+  WARN_NO_OPENSSL=1
+fi
+
+# --- explicit retrieval: wcp . [code] or wcp get [code/url] ----------------
+
+do_explicit_retrieve() {
+  local code="$1"
+  local letter="${code:0:1}"
+
+  # Check if this is an encrypted code (contains '-')
+  local enc_key=""
+  local actual_code="$code"
+  if [[ "$code" == *-* ]]; then
+    actual_code="${code%%-*}"
+    enc_key="${code#*-}"
+  fi
+
+  # Validate prefix letter
+  local backend_name=""
+  case "$letter" in
+    a|b|c|d|e|f|g|h|i|j|k|l|m|n|o) backend_name="litterbox" ;;
+    A|B|C|D|E|F|G|H|I|J|K|L|M|N|O) backend_name="catbox" ;;
+    0) backend_name="litterbox" ;;
+    1) backend_name="catbox" ;;
+    *)
+      echo "wcp: '${code}' is not a valid code (unknown prefix '${letter}')" >&2
+      return 1
+      ;;
+  esac
+
+  # Determine extension for error message
+  local ext_str=""
+  if [[ "$letter" =~ [a-z] ]]; then
+    local i=$(( $(printf '%d' "'$letter") - 97 ))
+    if [[ $i -lt ${#EXT_TABLE[@]} ]]; then
+      ext_str=".${EXT_TABLE[$i]}"
+    fi
+  elif [[ "$letter" =~ [A-Z] ]]; then
+    local i=$(( $(printf '%d' "'$letter") - 65 ))
+    if [[ $i -lt ${#EXT_TABLE[@]} ]]; then
+      ext_str=".${EXT_TABLE[$i]}"
+    fi
+  else
+    ext_str=".txt"
+  fi
+
+  if [[ -z "$ext_str" ]]; then
+    ext_str=".txt"
+  fi
+
+  # Resolve fetch host
+  local fetch_host
+  if [[ -n "$HOST" ]]; then
+    fetch_host="$HOST"
+  elif [[ "$backend_name" == "catbox" ]]; then
+    fetch_host="$DEFAULT_FETCH_HOST_CATBOX"
+  else
+    fetch_host="$DEFAULT_FETCH_HOST_LITTERBOX"
+  fi
+
+  # Decode the code to get the ID
+  if ! decode_code "$actual_code"; then
+    echo "wcp: '${code}' is not a valid code (unknown prefix '${letter}')" >&2
+    return 1
+  fi
+
+  if [[ -n "$enc_key" ]]; then
+    # Encrypted retrieval
+    check_openssl
+    local hdrfile bodyfile http_code
+    hdrfile="$(mktemp)"
+    bodyfile="$(mktemp)"
+    http_code="$(curl -sSL -D "$hdrfile" -o "$bodyfile" -w '%{http_code}' "${fetch_host%/}/${DECODED_ID}")"
+    if [[ "$http_code" -ge 400 ]]; then
+      rm -f "$hdrfile" "$bodyfile"
+      code_not_found "$actual_code" "$backend_name" "$ext_str"
+      return 1
+    fi
+    rm -f "$hdrfile"
+
+    if ! decrypt_and_emit "$enc_key" "$bodyfile"; then
+      rm -f "$bodyfile"
+      return 1
+    fi
+    rm -f "$bodyfile"
+  else
+    if ! retrieve_url "${fetch_host%/}/${DECODED_ID}"; then
+      code_not_found "$code" "$backend_name" "$ext_str"
+      return 1
+    fi
+  fi
+  return 0
+}
+
+if [[ "${ARGS[0]:-}" == "." ]]; then
+  if [[ ${#ARGS[@]} -lt 2 ]]; then
+    echo "wcp: . needs a code, e.g. wcp . b0ojyr4" >&2
+    exit 1
+  fi
+  if ! do_explicit_retrieve "${ARGS[1]}"; then
+    exit 1
+  fi
+  exit 0
+fi
+
+if [[ "${ARGS[0]:-}" == "get" ]]; then
+  local_get_url=""
+  local_get_out=""
+  local_i=1
+  while [[ $local_i -lt ${#ARGS[@]} ]]; do
+    case "${ARGS[$local_i]}" in
+      -o|--output) local_get_out="${ARGS[$((local_i+1))]}"; local_i=$((local_i+2)) ;;
+      *) local_get_url="${ARGS[$local_i]}"; local_i=$((local_i+1)) ;;
+    esac
+  done
+  if [[ -z "$local_get_url" ]]; then
+    echo "Usage: wcp get <url|code> [-o outputfile]" >&2
+    exit 1
+  fi
+  # Distinguish URL from code by scheme
+  if [[ "$local_get_url" == http://* || "$local_get_url" == https://* ]]; then
+    if ! retrieve_url "$local_get_url" "$local_get_out"; then
+      echo "wcp: failed to fetch $local_get_url" >&2
+      exit 1
+    fi
+  else
+    if ! do_explicit_retrieve "$local_get_url"; then
+      exit 1
+    fi
+  fi
+  exit 0
+fi
+
+# --- short-code retrieval: single token, not an existing local file --------
+
 if [[ ${#ARGS[@]} -eq 1 && ! -f "${ARGS[0]}" ]]; then
   CANDIDATE="${ARGS[0]}"
   LETTER="${CANDIDATE:0:1}"
-  ID="${CANDIDATE:1}"
-  if [[ -n "$ID" ]]; then
-    if [[ -n "$HOST" ]]; then
-      FETCH_HOST="$HOST"
-      VALID_LETTER=1
-    else
-      FETCH_HOST="$(default_fetch_host_for_letter "$LETTER" 2>/dev/null)" && VALID_LETTER=1 || VALID_LETTER=0
-    fi
-    if [[ "${VALID_LETTER:-0}" -eq 1 ]]; then
-      if retrieve_url "${FETCH_HOST%/}/${ID}"; then
-        exit 0
+  REST="${CANDIDATE:1}"
+
+  # Check if this looks like an encrypted code (contains '-')
+  ENC_KEY=""
+  ACTUAL_CANDIDATE="$CANDIDATE"
+  if [[ "$CANDIDATE" == *-* ]]; then
+    ACTUAL_CANDIDATE="${CANDIDATE%%-*}"
+    ENC_KEY="${CANDIDATE#*-}"
+    REST="${ACTUAL_CANDIDATE:1}"
+  fi
+
+  # Try to decode as a new-format code
+  if decode_code "$ACTUAL_CANDIDATE"; then
+    # Shape check: length <= 7 -> current behaviour; length > 7 -> only if contains . or -
+    local_cand_len=${#CANDIDATE}
+    shape_ok=0
+    if [[ $local_cand_len -le 7 ]]; then
+      if [[ "$REST" =~ ^[0-9a-zA-Z]{5,12}$ ]]; then
+        shape_ok=1
       fi
-      # else: fall through to normal upload handling below, treating
-      # ARGS[0] as text to upload.
+    else
+      if [[ "$CANDIDATE" == *.* || "$CANDIDATE" == *-* ]]; then
+        if [[ "$REST" =~ ^[0-9a-zA-Z]{5,12}$ ]]; then
+          shape_ok=1
+        fi
+      fi
+    fi
+    if [[ $shape_ok -eq 1 ]]; then
+      # Resolve fetch host from decoded backend
+      if [[ -n "$HOST" ]]; then
+        FETCH_HOST="$HOST"
+      elif [[ "$DECODED_BACKEND" == "catbox" ]]; then
+        FETCH_HOST="$DEFAULT_FETCH_HOST_CATBOX"
+      else
+        FETCH_HOST="$DEFAULT_FETCH_HOST_LITTERBOX"
+      fi
+      if [[ -n "$ENC_KEY" ]]; then
+        # Encrypted retrieval — do NOT fall back to upload on 404
+        check_openssl
+        enc_hdrfile="$(mktemp)"
+        enc_bodyfile="$(mktemp)"
+        enc_http_code="$(curl -sSL -D "$enc_hdrfile" -o "$enc_bodyfile" -w '%{http_code}' "${FETCH_HOST%/}/${DECODED_ID}")"
+        if [[ "$enc_http_code" -ge 400 ]]; then
+          rm -f "$enc_hdrfile" "$enc_bodyfile"
+          code_not_found "$ACTUAL_CANDIDATE" "$DECODED_BACKEND" ""
+          exit 1
+        fi
+        rm -f "$enc_hdrfile"
+
+        if ! decrypt_and_emit "$ENC_KEY" "$enc_bodyfile"; then
+          rm -f "$enc_bodyfile"
+          exit 1
+        fi
+        rm -f "$enc_bodyfile"
+        exit 0
+      else
+        if retrieve_url "${FETCH_HOST%/}/${DECODED_ID}"; then
+          exit 0
+        fi
+      fi
+      # else: fall through to upload (only for non-encrypted)
+    elif [[ "$ACTUAL_CANDIDATE" == *.* ]]; then
+      # Backward-compat old-format code (letter a/c with dot in rest)
+      if [[ -n "$HOST" ]]; then
+        FETCH_HOST="$HOST"
+      elif [[ "$DECODED_BACKEND" == "catbox" ]]; then
+        FETCH_HOST="$DEFAULT_FETCH_HOST_CATBOX"
+      else
+        FETCH_HOST="$DEFAULT_FETCH_HOST_LITTERBOX"
+      fi
+      if [[ -n "$ENC_KEY" ]]; then
+        # Encrypted retrieval — do NOT fall back to upload on 404
+        check_openssl
+        enc_hdrfile="$(mktemp)"
+        enc_bodyfile="$(mktemp)"
+        enc_http_code="$(curl -sSL -D "$enc_hdrfile" -o "$enc_bodyfile" -w '%{http_code}' "${FETCH_HOST%/}/${DECODED_ID}")"
+        if [[ "$enc_http_code" -ge 400 ]]; then
+          rm -f "$enc_hdrfile" "$enc_bodyfile"
+          code_not_found "$ACTUAL_CANDIDATE" "$DECODED_BACKEND" ""
+          exit 1
+        fi
+        rm -f "$enc_hdrfile"
+
+        if ! decrypt_and_emit "$ENC_KEY" "$enc_bodyfile"; then
+          rm -f "$enc_bodyfile"
+          exit 1
+        fi
+        rm -f "$enc_bodyfile"
+        exit 0
+      else
+        if retrieve_url "${FETCH_HOST%/}/${DECODED_ID}"; then
+          exit 0
+        fi
+      fi
     fi
   fi
 fi
 
 case "$BACKEND" in
-  0x0)         DEFAULT_HOST="$DEFAULT_UPLOAD_HOST_0X0" ;;
-  transfer.sh) DEFAULT_HOST="$DEFAULT_UPLOAD_HOST_TRANSFERSH" ;;
   catbox)      DEFAULT_HOST="$DEFAULT_UPLOAD_HOST_CATBOX" ;;
+  litterbox)   DEFAULT_HOST="$DEFAULT_UPLOAD_HOST_LITTERBOX" ;;
   *)
-    echo "Unknown backend: $BACKEND (expected: 0x0, transfer.sh, catbox)" >&2
+    echo "wcp: unknown backend: $BACKEND (expected: catbox, litterbox)" >&2
     exit 1
     ;;
 esac
@@ -206,17 +705,8 @@ do_copy() {
   fi
 }
 
-# --- backend: 0x0 (POST /, multipart "file" field) --------------------------
-up_0x0_file()  { curl -sS -F "file=@${1}" "$HOST"; }
-up_0x0_text()  { printf '%s' "$1" | curl -sS -F "file=@-" "$HOST"; }
-up_0x0_stdin() { curl -sS -F "file=@-" "$HOST"; }
-
-# --- backend: transfer.sh (PUT, filename in the URL path) -------------------
-up_transfersh_file()  { curl -sS -T "$1" "$HOST/$(basename "$1")"; }
-up_transfersh_text()  { printf '%s' "$1" | curl -sS -T - "$HOST/paste.txt"; }
-up_transfersh_stdin() { curl -sS -T - "$HOST/paste.txt"; }
-
 # --- backend: catbox (POST, multipart reqtype=fileupload) -------------------
+
 up_catbox_file()  { curl -sS -F "reqtype=fileupload" -F "fileToUpload=@${1}" "$HOST"; }
 up_catbox_text() {
   local tmp
@@ -233,24 +723,27 @@ up_catbox_stdin() {
   rm -f "$tmp"
 }
 
+# backend: litterbox (POST, multipart reqtype=fileupload + time)
+up_litterbox_file()  { curl -sS -F "reqtype=fileupload" -F "time=${LBTIME}" -F "fileToUpload=@${1}" "$HOST"; }
+up_litterbox_text() {
+  local tmp
+  tmp="$(mktemp /tmp/wcp-paste.XXXXXX.txt)"
+  printf '%s' "$1" > "$tmp"
+  curl -sS -F "reqtype=fileupload" -F "time=${LBTIME}" -F "fileToUpload=@${tmp}" "$HOST"
+  rm -f "$tmp"
+}
+up_litterbox_stdin() {
+  local tmp
+  tmp="$(mktemp /tmp/wcp-paste.XXXXXX.txt)"
+  cat > "$tmp"
+  curl -sS -F "reqtype=fileupload" -F "time=${LBTIME}" -F "fileToUpload=@${tmp}" "$HOST"
+  rm -f "$tmp"
+}
+
 dispatch() {
   local kind="$1" # file | text | stdin
   local arg="${2:-}"
   case "$BACKEND" in
-    0x0)
-      case "$kind" in
-        file)  up_0x0_file "$arg" ;;
-        text)  up_0x0_text "$arg" ;;
-        stdin) up_0x0_stdin ;;
-      esac
-      ;;
-    transfer.sh)
-      case "$kind" in
-        file)  up_transfersh_file "$arg" ;;
-        text)  up_transfersh_text "$arg" ;;
-        stdin) up_transfersh_stdin ;;
-      esac
-      ;;
     catbox)
       case "$kind" in
         file)  up_catbox_file "$arg" ;;
@@ -258,21 +751,116 @@ dispatch() {
         stdin) up_catbox_stdin ;;
       esac
       ;;
+    litterbox)
+      case "$kind" in
+        file)  up_litterbox_file "$arg" ;;
+        text)  up_litterbox_text "$arg" ;;
+        stdin) up_litterbox_stdin ;;
+      esac
+      ;;
   esac
 }
 
-if [[ ${#ARGS[@]} -eq 0 || ( ${#ARGS[@]} -eq 1 && "${ARGS[0]}" == "-" ) ]]; then
-  RESULT="$(dispatch stdin)"
-elif [[ ${#ARGS[@]} -eq 1 && -f "${ARGS[0]}" ]]; then
-  RESULT="$(dispatch file "${ARGS[0]}")"
-else
-  TEXT="${ARGS[*]}"
-  RESULT="$(dispatch text "$TEXT")"
+# Warn here rather than at parse time, so retrievals stay quiet.
+if [[ $WARN_NO_OPENSSL -eq 1 ]]; then
+  perm=""
+  [[ "$BACKEND" == "catbox" ]] && perm=" and permanently"
+  echo "wcp: openssl not found — uploading to $BACKEND UNENCRYPTED${perm}" >&2
+  echo "wcp: install openssl, or pass --plain to silence this" >&2
 fi
 
-LETTER="$(letter_for_backend "$BACKEND")"
-ID="$(strip_host "$RESULT")"
-CODE="${LETTER}${ID}"
+if [[ ${#ARGS[@]} -eq 0 || ( ${#ARGS[@]} -eq 1 && "${ARGS[0]}" == "-" ) ]]; then
+  if [[ $ENCRYPT -eq 1 ]]; then
+    check_openssl
+    KEY="$(gen_key)"
+    TMPF="$(mktemp /tmp/wcp-enc.XXXXXX)"
+    cat | encrypt_content "$KEY" > "$TMPF"
+    ENC_CONTENT="$(cat "$TMPF")"
+    rm -f "$TMPF"
+    RESULT="$(dispatch text "$ENC_CONTENT")"
+    if [[ ! "$RESULT" =~ ^https?://[^[:space:]]+$ ]]; then
+      echo "wcp: upload failed on backend '$BACKEND' ($HOST)" >&2
+      echo "wcp: backend reply: ${RESULT:-<empty response>}" >&2
+      exit 1
+    fi
+    ID_FULL="$(strip_host "$RESULT")"
+    CODE="$(encode_id "$ID_FULL" "$BACKEND")"
+    echo "${CODE}-${KEY}"
+    if [[ $COPY -eq 1 ]]; then do_copy "${CODE}-${KEY}"; fi
+    exit 0
+  else
+    RESULT="$(dispatch stdin)"
+  fi
+elif [[ ${#ARGS[@]} -eq 1 && -f "${ARGS[0]}" ]]; then
+  if [[ $ENCRYPT -eq 1 ]]; then
+    check_openssl
+    FPATH="${ARGS[0]}"
+    FSIZE="$(stat -c%s "$FPATH" 2>/dev/null || stat -f%z "$FPATH" 2>/dev/null)"
+    if is_text_file "$FPATH"; then
+      if [[ "$FSIZE" -le 102400 ]]; then
+        KEY="$(gen_key)"
+        FNAME="$(basename "$FPATH")"
+        TMPF="$(mktemp /tmp/wcp-enc.XXXXXX)"
+        { printf 'wcp-name:%s\n' "$FNAME"; cat "$FPATH"; } | encrypt_content "$KEY" > "$TMPF"
+        ENC_CONTENT="$(cat "$TMPF")"
+        rm -f "$TMPF"
+        RESULT="$(dispatch text "$ENC_CONTENT")"
+        if [[ ! "$RESULT" =~ ^https?://[^[:space:]]+$ ]]; then
+          echo "wcp: upload failed on backend '$BACKEND' ($HOST)" >&2
+          echo "wcp: backend reply: ${RESULT:-<empty response>}" >&2
+          exit 1
+        fi
+        ID_FULL="$(strip_host "$RESULT")"
+        CODE="$(encode_id "$ID_FULL" "$BACKEND")"
+        echo "${CODE}-${KEY}"
+        if [[ $COPY -eq 1 ]]; then do_copy "${CODE}-${KEY}"; fi
+        exit 0
+      else
+        HSIZE="$(human_size "$FSIZE")"
+        echo "wcp: not encrypting $(basename "$FPATH") — ${HSIZE} exceeds the 100 KB limit, uploading as-is" >&2
+        RESULT="$(dispatch file "$FPATH")"
+      fi
+    else
+      echo "wcp: not encrypting $(basename "$FPATH") — not a text file, uploading as-is" >&2
+      RESULT="$(dispatch file "$FPATH")"
+    fi
+  else
+    RESULT="$(dispatch file "${ARGS[0]}")"
+  fi
+else
+  if [[ $ENCRYPT -eq 1 ]]; then
+    check_openssl
+    KEY="$(gen_key)"
+    TEXT="${ARGS[*]}"
+    TMPF="$(mktemp /tmp/wcp-enc.XXXXXX)"
+    printf '%s' "$TEXT" | encrypt_content "$KEY" > "$TMPF"
+    ENC_CONTENT="$(cat "$TMPF")"
+    rm -f "$TMPF"
+    RESULT="$(dispatch text "$ENC_CONTENT")"
+    if [[ ! "$RESULT" =~ ^https?://[^[:space:]]+$ ]]; then
+      echo "wcp: upload failed on backend '$BACKEND' ($HOST)" >&2
+      echo "wcp: backend reply: ${RESULT:-<empty response>}" >&2
+      exit 1
+    fi
+    ID_FULL="$(strip_host "$RESULT")"
+    CODE="$(encode_id "$ID_FULL" "$BACKEND")"
+    echo "${CODE}-${KEY}"
+    if [[ $COPY -eq 1 ]]; then do_copy "${CODE}-${KEY}"; fi
+    exit 0
+  else
+    TEXT="${ARGS[*]}"
+    RESULT="$(dispatch text "$TEXT")"
+  fi
+fi
+
+if [[ ! "$RESULT" =~ ^https?://[^[:space:]]+$ ]]; then
+  echo "wcp: upload failed on backend '$BACKEND' ($HOST)" >&2
+  echo "wcp: backend reply: ${RESULT:-<empty response>}" >&2
+  exit 1
+fi
+
+ID_FULL="$(strip_host "$RESULT")"
+CODE="$(encode_id "$ID_FULL" "$BACKEND")"
 
 echo "$CODE"
-[[ $COPY -eq 1 ]] && do_copy "$CODE"
+if [[ $COPY -eq 1 ]]; then do_copy "$CODE"; fi

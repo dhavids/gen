@@ -7,11 +7,11 @@
 #   wcp brbkswy                 # retrieve (implicit): may fall back to uploading
 #   wcp . brbkswy               # retrieve (explicit): errors instead of falling back
 #   wcp . <full-url>            # retrieve by URL instead of a code
-#   wcp brbkswy -o out.txt      # ...saved under a name you choose
+#   wcp . brbkswy -o out.txt    # ...saved under a name you choose
 #
 # Retrieved text prints to stdout; retrieved files are saved into the current
 # folder. Existing files are never overwritten - _1, _2 are appended and the
-# name actually used is printed.
+# name actually used is printed. Encrypted files restore their original name.
 #
 # The first character of the printed code encodes BOTH the backend and the
 # file extension. Lowercase a-o = litterbox, uppercase A-O = catbox.
@@ -26,7 +26,7 @@
 # -t [hours] takes a whole number of hours and rounds UP to the nearest of
 # 1h, 12h, 24h, 72h (litterbox only; catbox never expires). Max 72h.
 #
-# Env vars: $env:WCP_BACKEND (default: litterbox), $env:WCP_TIME (whole hours, default 1)
+# Env vars: $env:WCP_BACKEND (default: catbox), $env:WCP_TIME (whole hours, default 1)
 #
 # Collision handling: a candidate of 7 chars or fewer that looks like a code is
 # tried as a retrieval first; if that 404s it falls back to uploading it as
@@ -34,11 +34,31 @@
 # escape-path codes carry a dot, encrypted codes a dash), so an ordinary long
 # word is uploaded straight away with no wasted request.
 #
-# Encryption is NOT implemented in this PowerShell version. Uploads require
-# --plain / -p (or WCP_PLAIN=1) since encryption is on by default. Retrieving
-# a code containing a - errors out. Short aliases: -b backend, -c copy, -p plain, -t time.
+# With a key stored (--set-key), every upload is encrypted with it and the
+# code stays 7 characters, because the key never travels; -z opts out.
+# With no stored key: catbox is encrypted with a random per-upload key that
+# rides in the code, litterbox is plain because it expires within hours.
+# -e / --encrypt forces it on; --plain / -p and WCP_PLAIN=1 force it off.
+# Encrypted codes use a 12-char alphanumeric key: CODE-KEY (~20 chars total).
+# The KEY is NEVER uploaded - only the ciphertext goes to the server.
+# Losing the KEY loses the data permanently.
+#   wcp -b c hello world -> B0ojyr4-AbCdEfGhIjKl
+# curl.exe and openssl are both required.
+# Files up to 1 MB are encrypted, any type; -f raises that to 100 MB.
 #
-# Requires curl.exe (bundled with Windows 10+ by default).
+# -l prints the full URL instead of the code; with -e the key follows on a
+# second line and only the URL is copied. Retrieve with: wcp . <url> <key>
+#
+# -a appends stdin, argument text or the clipboard to a local buffer, -s
+# uploads it, --clear empties it. Entries are separated by two blank lines.
+# A piped entry gets no command label: a PowerShell pipeline passes objects
+# inside one process, so there is no writer process to name.
+#
+# Short aliases: -b backend, -c copy, -e encrypt, -f force, -l link,
+# -p plain, -t time.
+#
+# Keep this file pure ASCII: PowerShell 5.1 reads a BOM-less file as CP1252,
+# where a stray UTF-8 byte becomes a quote and breaks parsing.
 
 $ErrorActionPreference = "Stop"
 
@@ -54,6 +74,11 @@ function Read-PipedInput {
         return ($PipelineInput -join [Environment]::NewLine)
     }
     return [Console]::In.ReadToEnd()
+}
+
+# Write to stderr without Write-Error's error record or its throw.
+function Warn([string]$Message) {
+    [Console]::Error.WriteLine($Message)
 }
 
 $DefaultUploadHostCatbox = "https://catbox.moe/user/api.php"
@@ -138,7 +163,7 @@ function Decode-Code([string]$Candidate) {
 function Convert-LitterboxTimeBucket([string]$Hours) {
     $h = $Hours -replace 'h$', ''
     if ($h -notmatch '^\d+$' -or [int]$h -lt 1) {
-        Write-Error "wcp: -t takes a whole number of hours, 1 to 72"
+        Warn "wcp: -t takes a whole number of hours, 1 to 72"
         exit 1
     }
     $h = [int]$h
@@ -147,7 +172,7 @@ function Convert-LitterboxTimeBucket([string]$Hours) {
     elseif ($h -le 24) { return "24h" }
     elseif ($h -le 72) { return "72h" }
     else {
-        Write-Error "wcp: -t max is 72 hours (litterbox allows 1, 12, 24, 72)"
+        Warn "wcp: -t max is 72 hours (litterbox allows 1, 12, 24, 72)"
         exit 1
     }
 }
@@ -171,6 +196,257 @@ function Get-UniqueSaveName([string]$Name) {
         $cand = if ($dir) { Join-Path $dir $leaf } else { $leaf }
         if (-not (Test-Path -LiteralPath $cand)) { return $cand }
         $n += 1
+    }
+}
+
+function HumanSize([long]$Bytes) {
+    if ($Bytes -ge 1048576) { return "$($Bytes / 1048576) MB" }
+    if ($Bytes -ge 1024) { return "$(([math]::Round(($Bytes + 512) / 1024))) KB" }
+    return "$Bytes B"
+}
+
+function Read-StoredKey {
+    if (-not (Test-Path -LiteralPath $KeyPath)) { return "" }
+    $k = Get-Content -LiteralPath $KeyPath -TotalCount 1
+    if ($null -eq $k) { return "" }
+    return $k.Trim()
+}
+
+function Write-StoredKey([string]$Key) {
+    if ($Key.Length -lt $MinStoredKey) {
+        Warn "wcp: a stored key needs at least $MinStoredKey characters"
+        Warn "wcp: run --set-key with no value to generate one"
+        return $false
+    }
+    if ($Key -notmatch '^[A-Za-z0-9]+$') {
+        Warn "wcp: a stored key may only contain letters and digits"
+        return $false
+    }
+    $dir = Split-Path -Parent $KeyPath
+    if (-not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    $enc = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::WriteAllText($KeyPath, $Key, $enc)
+    # Windows has no chmod, so drop inherited rights and grant only this user.
+    $acl = Get-Acl -LiteralPath $KeyPath
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($r in @($acl.Access)) { $acl.RemoveAccessRule($r) | Out-Null }
+    $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $me, "FullControl", "Allow")
+    $acl.AddAccessRule($rule)
+    Set-Acl -LiteralPath $KeyPath -AclObject $acl
+    return $true
+}
+
+# True when a body is base64 ciphertext we produced.
+function Test-Encrypted([string]$Path) {
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 10) { return $false }
+    $head = [System.Text.Encoding]::ASCII.GetString($bytes, 0, 10)
+    if ($head -ne "U2FsdGVkX1") { return $false }
+    $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+    return ($text -match '^[A-Za-z0-9+/=\r\n]*$')
+}
+
+# Set key to encrypt with, and EmitKey to the key the code should carry.
+function Select-Key {
+    if ($StoredKey) {
+        $script:key = $StoredKey
+        $script:EmitKey = ""
+    } else {
+        $script:key = New-WcpKey $KeyLen
+        $script:EmitKey = $script:key
+    }
+}
+
+function Describe-Reply([string]$Reply) {
+    # A blocked request answers with a whole HTML page, not a message.
+    if ([string]::IsNullOrEmpty($Reply)) {
+        return "<empty response>"
+    }
+    if ($Reply -match '(?i)<html|<!doctype') {
+        $out = "HTML error page"
+        $m = [regex]::Match($Reply, '(?i)<title>([^<]*)')
+        if ($m.Success) {
+            $out += " - " + $m.Groups[1].Value.Trim()
+        }
+        $r = [regex]::Match($Reply, 'Request ID: <code>([^<]*)')
+        if ($r.Success) {
+            $out += " (request id " + $r.Groups[1].Value.Trim() + ")"
+        }
+        return $out
+    }
+    if ($Reply.Length -gt 200) {
+        return $Reply.Substring(0, 200) + "... [" + $Reply.Length + " bytes total]"
+    }
+    return $Reply
+}
+
+# Run the powershell blocks in tests.md, in a sandbox of their own.
+function Invoke-TestSheet([string]$Sheet) {
+    if (-not $Sheet) {
+        $here = Split-Path -Parent $PSCommandPath
+        $Sheet = Join-Path $here 'tests.md'
+    }
+    if (-not (Test-Path -LiteralPath $Sheet)) {
+        Warn "wcp: no test sheet at $Sheet"
+        Warn "wcp: pass one explicitly: wcp --run-tests <file.md>"
+        return 1
+    }
+
+    $stamp = [Guid]::NewGuid().ToString('N').Substring(0, 8)
+    $sandbox = Join-Path ([System.IO.Path]::GetTempPath()) ("wcp-tests-" + $stamp)
+    $work = Join-Path $sandbox 'work'
+    New-Item -ItemType Directory -Path $work -Force | Out-Null
+
+    # The key and the buffer both hang off LOCALAPPDATA, so moving it moves both
+    # and the real ones are never touched.
+    $oldLocal = $env:LOCALAPPDATA
+    $oldNoCopy = $env:WCP_NO_COPY
+    $oldPwd = $PWD.Path
+    $env:LOCALAPPDATA = $sandbox
+    $env:WCP_NO_COPY = '1'
+    Set-Location -LiteralPath $work
+
+    # Errors go to [Console]::Error, which no in-process call can capture, so
+    # each command runs wcp as a child and merges its streams.
+    $script:WcpBin = $PSCommandPath
+    $pass = 0
+    $fail = 0
+    $out = ''
+    $inFence = $false
+
+    [Console]::Out.WriteLine("wcp: running $Sheet")
+    foreach ($line in (Get-Content -LiteralPath $Sheet)) {
+        if ($line -match '^```powershell\s*$') { $inFence = $true; continue }
+        if ($line -match '^```') { $inFence = $false; continue }
+        if (-not $inFence) { continue }
+        if ($line.Trim() -eq '') { continue }
+
+        if ($line -match '^#\s*->\s?(.*)$') {
+            $want = $matches[1]
+            if ($out -like ('*' + $want + '*')) {
+                $pass += 1
+            } else {
+                $fail += 1
+                $seen = $out -replace "`r?`n", ' '
+                if ($seen.Length -gt 70) { $seen = $seen.Substring(0, 70) }
+                [Console]::Out.WriteLine("  FAIL $want")
+                [Console]::Out.WriteLine("       got: $seen")
+            }
+            continue
+        }
+        if ($line -match '^#\s*~>\s?(.*)$') {
+            $want = $matches[1]
+            if ($out -match $want) {
+                $pass += 1
+            } else {
+                $fail += 1
+                $seen = $out -replace "`r?`n", ' '
+                if ($seen.Length -gt 70) { $seen = $seen.Substring(0, 70) }
+                [Console]::Out.WriteLine("  FAIL $want")
+                [Console]::Out.WriteLine("       got: $seen")
+            }
+            continue
+        }
+        if ($line -match '^#') { continue }
+
+        try {
+            $out = (Invoke-Expression $line 2>&1 | Out-String).Trim()
+        } catch {
+            $out = $_.Exception.Message
+        }
+    }
+
+    Set-Location -LiteralPath $oldPwd
+    $env:LOCALAPPDATA = $oldLocal
+    $env:WCP_NO_COPY = $oldNoCopy
+    Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
+
+    [Console]::Out.WriteLine("")
+    [Console]::Out.WriteLine("$pass passed, $fail failed")
+    if ($fail -eq 0) { return 0 }
+    return 1
+}
+
+# Spawn wcp as a child so its stderr is a real stream the sheet can capture.
+function wcp {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $script:WcpBin @args 2>&1
+}
+
+# Show the buffer: head and tail only on a terminal, unless --full.
+function Show-Buffer {
+    if (-not (Test-Path -LiteralPath $BufferPath)) {
+        Warn "wcp: buffer is empty - nothing to show"
+        return
+    }
+    $lines = @(Get-Content -LiteralPath $BufferPath)
+    if ($lines.Count -eq 0) {
+        Warn "wcp: buffer is empty - nothing to show"
+        return
+    }
+    if ($Full -or [Console]::IsOutputRedirected -or $lines.Count -le 10) {
+        foreach ($l in $lines) { [Console]::Out.WriteLine($l) }
+    } else {
+        foreach ($l in $lines[0..4]) { [Console]::Out.WriteLine($l) }
+        $hidden = $lines.Count - 10
+        [Console]::Out.WriteLine(
+            "... $hidden lines hidden, --full shows everything ...")
+        foreach ($l in $lines[-5..-1]) { [Console]::Out.WriteLine($l) }
+    }
+    $entries = CountEntries $BufferPath
+    $sz = HumanSize (Get-Item $BufferPath).Length
+    Warn "wcp: $(Format-Entries $entries), $sz"
+}
+
+function Format-Entries([int]$N) {
+    if ($N -eq 1) { return "1 entry" }
+    return "$N entries"
+}
+
+function CountEntries([string]$Path) {
+    $n = 1; $b = 0
+    foreach ($line in Get-Content $Path) {
+        if ($line -eq '') { $b++; continue }
+        if ($b -ge 2) { $n++; $b = 0 }
+        $b = 0
+    }
+    if ($b -ge 2) { $n++ }
+    return $n
+}
+
+function EmitResult([string]$IdFull, [string]$Backend, [string]$Key) {
+    $fetchHost = $DefaultFetchHostLitterbox
+    if ($UploadHost) {
+        $fetchHost = $UploadHost
+    } elseif ($Backend -eq "catbox") {
+        $fetchHost = $DefaultFetchHostCatbox
+    }
+    $code = Encode-Id $IdFull $Backend
+    if ($Link) {
+        $url = "$($fetchHost.TrimEnd('/'))/$IdFull"
+        [Console]::Out.WriteLine($url)
+        # clipboard gets link only, never the key
+        if (-not $NoCopy -and ($DoCopy -or
+            (-not [Console]::IsOutputRedirected))) {
+            try { $url | Set-Clipboard } catch {}
+        }
+        if ($Key) { [Console]::Out.WriteLine($Key) }
+    } elseif ($Key) {
+        $full = "$code-$Key"
+        [Console]::Out.WriteLine($full)
+        if (-not $NoCopy -and ($DoCopy -or
+            (-not [Console]::IsOutputRedirected))) {
+            try { $full | Set-Clipboard } catch {}
+        }
+    } else {
+        [Console]::Out.WriteLine($code)
+        if (-not $NoCopy -and ($DoCopy -or
+            (-not [Console]::IsOutputRedirected))) {
+            try { $code | Set-Clipboard } catch {}
+        }
     }
 }
 
@@ -199,15 +475,34 @@ function Find-OpenSsl {
 
 $OpenSslPath = Find-OpenSsl
 
-function Assert-OpenSsl {
-    if ($OpenSslPath) { return }
-    Write-Error "wcp: encryption needs openssl, which was not found on PATH."
-    Write-Error "wcp: install it with one of:"
-    Write-Error "wcp:   winget install ShiningLight.OpenSSL.Light"
-    Write-Error "wcp:   choco install openssl"
-    Write-Error "wcp: Git for Windows also ships one at C:\Program Files\Git\usr\bin."
-    Write-Error "wcp: or use --plain (-p) to upload without encryption."
+# Fail early when curl.exe or openssl is missing.
+function Require-Tools {
+    $missing = @()
+    if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) {
+        $missing += "curl.exe"
+    }
+    if (-not $OpenSslPath) { $missing += "openssl" }
+    if ($missing.Count -eq 0) { return }
+    Warn ("wcp: missing required tool(s): " + ($missing -join ", "))
+    if ($missing -contains "curl.exe") {
+        Warn "wcp: curl.exe ships with Windows 10 (1803+) and Windows 11, so"
+        Warn "wcp: check C:\Windows\System32 is on PATH, or install it with:"
+        Warn "wcp:   winget install cURL.cURL"
+        Warn "wcp:   choco install curl"
+    }
+    if ($missing -contains "openssl") {
+        Warn "wcp: install openssl with one of:"
+        Warn "wcp:   winget install ShiningLight.OpenSSL.Light"
+        Warn "wcp:   choco install openssl"
+        Warn "wcp: Git for Windows also ships one at"
+        Warn "wcp:   C:\Program Files\Git\usr\bin\openssl.exe"
+        Warn "wcp: then reopen your terminal so PATH picks it up."
+    }
     exit 1
+}
+
+function Assert-OpenSsl {
+    Require-Tools
 }
 
 function New-TempPath {
@@ -236,7 +531,7 @@ function Protect-Bytes([byte[]]$Plain, [string]$Key) {
         & $OpenSslPath enc -aes-256-cbc -pbkdf2 -iter 10000 -salt `
             -pass "pass:$Key" -in $inFile -out $outFile 2>$null
         if ($LASTEXITCODE -ne 0) {
-            Write-Error "wcp: encryption failed"
+            Warn "wcp: encryption failed"
             exit 1
         }
         return [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($outFile))
@@ -272,7 +567,7 @@ function Invoke-EncryptedRetrieve([string]$Url, [string]$Key, [string]$OutFile) 
         if ([int]$status -ge 400) { return $false }
         $plain = Unprotect-Bytes ([System.IO.File]::ReadAllText($bodyFile)) $Key
         if ($null -eq $plain) {
-            Write-Error "wcp: could not decrypt - wrong key or corrupted upload"
+            Warn "wcp: could not decrypt - wrong key or corrupted upload"
             exit 1
         }
         $nl = [Array]::IndexOf($plain, [byte]10)
@@ -308,6 +603,16 @@ function Invoke-Retrieve([string]$Url, [string]$OverrideOut) {
         $httpCode = & curl.exe -sSL -D $hdrFile -o $bodyFile -w '%{http_code}' $Url
         if ([int]$httpCode -ge 400) {
             return $false
+        }
+
+        # A stored-key upload has no key in its code, so detect it by shape.
+        if (Test-Encrypted $bodyFile) {
+            if (-not $StoredKey) {
+                Warn "wcp: this upload is encrypted, but no key is set here"
+                Warn "wcp: run --set-key with the key from the sending machine"
+                return $false
+            }
+            return (Invoke-EncryptedRetrieve $Url $StoredKey $OverrideOut)
         }
 
         $ctype = ""
@@ -351,17 +656,31 @@ Usage:
   wcp <code|url> -o <file>       retrieve and save under a chosen name
 
 Options:
-  -b, --backend <name>   litterbox (default) or catbox; -b l / -b c also work
+  -b, --backend <name>   catbox (default) or litterbox; -b c / -b l also work
       --host <url>       override the backend endpoint, or the fetch host
   -t, --time <hours>     litterbox expiry, rounds up to 1/12/24/72 (default 1)
   -p, --plain            upload without encryption
   -c, --copy             copy the code even when output is redirected
   -n, --no-copy          do not copy the code to the clipboard
+  -l, --link             print the full URL instead of the short code
+  -f, --force            encrypt a file of any type, up to 100 MB
+  -a, --accumulate       append stdin, text or the clipboard to the buffer
+                         with nothing to append, shows the buffer instead
+  -s, --send             upload the accumulated buffer and clear it
+      --clear            empty the buffer without uploading
+      --full             with -a, show the whole buffer, not head and tail
+      --run-tests [file] run the blocks in tests.md and report pass/fail
   -v, --paste            upload the clipboard contents (takes no arguments)
   -h, --help             show this help
 
-Encryption is NOT implemented in this PowerShell version. All uploads require
---plain (-p) or WCP_PLAIN=1 since encryption is on by default.
+Key store:
+      --set-key [key]    store a key (20+ chars); with no value, generate one
+      --get-key          print the stored key
+      --clear-key        forget the stored key
+  -z, --no-stored-key    ignore the stored key for this run
+
+With a key stored, every upload is encrypted with it and the code stays 7
+characters, because the key never travels. Both machines need the same key.
 
 Env: WCP_BACKEND, WCP_TIME (whole hours), WCP_PLAIN=1, WCP_NO_COPY=1
 "@
@@ -370,7 +689,7 @@ Env: WCP_BACKEND, WCP_TIME (whole hours), WCP_PLAIN=1, WCP_NO_COPY=1
 
 # Flag Parsing
 
-$Backend = if ($env:WCP_BACKEND) { $env:WCP_BACKEND } else { "litterbox" }
+$Backend = if ($env:WCP_BACKEND) { $env:WCP_BACKEND } else { "catbox" }
 $LbHours = if ($env:WCP_TIME) { $env:WCP_TIME } else { 1 }
 $UploadHost = ""
 $DoCopy = $false
@@ -381,6 +700,25 @@ $DoPaste = $false
 $OutFile = $null
 $KeyLen = 12
 $ForceEncrypt = $false
+$Link = $false
+$Force = $false
+$Accum = $false
+$Send = $false
+$Clear = $false
+$Full = $false
+$RunTests = $false
+$TestSheet = ""
+$NoKey = $false
+$DoSetKey = $false
+$SetKeyValue = ""
+$DoGetKey = $false
+$DoClearKey = $false
+$MinStoredKey = 20
+$KeyPath = Join-Path (Join-Path $env:LOCALAPPDATA 'wcp') 'key'
+$BufferPath = Join-Path (
+    if ($env:XDG_CACHE_HOME) { $env:XDG_CACHE_HOME }
+    else { Join-Path $env:LOCALAPPDATA 'wcp' }
+) 'buffer'
 if ($env:WCP_KEY_LEN) { $KeyLen = [int]$env:WCP_KEY_LEN }
 $rest = @()
 
@@ -436,12 +774,104 @@ while ($i -lt $args.Count) {
         $Plain = $true; $i += 1
     } elseif ($a -eq "-e" -or $a -eq "--encrypt") {
         $ForceEncrypt = $true; $i += 1
+    } elseif ($a -eq "-l" -or $a -eq "--link") {
+        $Link = $true; $i += 1
+    } elseif ($a -eq "-f" -or $a -eq "--force") {
+        $Force = $true; $i += 1
+    } elseif ($a -eq "-a" -or $a -eq "--accumulate") {
+        $Accum = $true; $i += 1
+    } elseif ($a -eq "-s" -or $a -eq "--send") {
+        $Send = $true; $i += 1
+    } elseif ($a -eq "--clear") {
+        $Clear = $true; $i += 1
+    } elseif ($a -eq "--full") {
+        $Full = $true; $i += 1
+    } elseif ($a -eq "--run-tests") {
+        $RunTests = $true; $i += 1
+        if ($i -lt $args.Count -and -not $args[$i].StartsWith("-")) {
+            $TestSheet = $args[$i]; $i += 1
+        }
+    } elseif ($a -eq "-z" -or $a -eq "--no-stored-key") {
+        $NoKey = $true; $i += 1
+    } elseif ($a -eq "--set-key") {
+        $DoSetKey = $true; $i += 1
+        # Optional value: only take a token that is not itself a flag.
+        if ($i -lt $args.Count -and -not $args[$i].StartsWith("-")) {
+            $SetKeyValue = $args[$i]; $i += 1
+        }
+    } elseif ($a -like "--set-key=*") {
+        $DoSetKey = $true
+        $SetKeyValue = $a.Substring(10); $i += 1
+    } elseif ($a -eq "--get-key") {
+        $DoGetKey = $true; $i += 1
+    } elseif ($a -eq "--clear-key") {
+        $DoClearKey = $true; $i += 1
     } else {
         $rest += $a; $i += 1
     }
 }
 
 if ($env:WCP_PLAIN -eq "1") { $Plain = $true }
+
+if ($Accum -and $Send) {
+    Warn "wcp: -a and -s do opposite things"
+    exit 1
+}
+
+# Checked after parsing, so --help still works on a bare machine.
+Require-Tools
+
+if ($RunTests) {
+    exit (Invoke-TestSheet $TestSheet)
+}
+
+# Key-store actions stand alone: they never combine with an upload.
+$keyActions = 0
+if ($DoSetKey) { $keyActions += 1 }
+if ($DoGetKey) { $keyActions += 1 }
+if ($DoClearKey) { $keyActions += 1 }
+if ($keyActions -gt 1) {
+    Warn "wcp: --set-key, --get-key and --clear-key are separate actions"
+    exit 1
+}
+if ($keyActions -eq 1) {
+    if ($rest.Count -gt 0) {
+        Warn "wcp: a key action takes no other arguments"
+        exit 1
+    }
+    if ($DoSetKey) {
+        if (-not $SetKeyValue) {
+            $SetKeyValue = New-WcpKey $MinStoredKey
+            if (-not (Write-StoredKey $SetKeyValue)) { exit 1 }
+            Warn "wcp: generated a new key and stored it"
+            [Console]::Out.WriteLine($SetKeyValue)
+        } else {
+            if (-not (Write-StoredKey $SetKeyValue)) { exit 1 }
+            Warn "wcp: key stored"
+        }
+        exit 0
+    }
+    if ($DoGetKey) {
+        $storedNow = Read-StoredKey
+        if (-not $storedNow) {
+            Warn "wcp: no key is set on this machine"
+            exit 1
+        }
+        [Console]::Out.WriteLine($storedNow)
+        exit 0
+    }
+    if (Test-Path -LiteralPath $KeyPath) {
+        Remove-Item -LiteralPath $KeyPath -Force
+        Warn "wcp: key cleared"
+    } else {
+        Warn "wcp: no key was set"
+    }
+    exit 0
+}
+
+# -z opts out of the stored key, restoring the per-backend default.
+$StoredKey = ""
+if (-not $NoKey) { $StoredKey = Read-StoredKey }
 
 $LbTime = Convert-LitterboxTimeBucket $LbHours
 
@@ -463,7 +893,7 @@ function Do-ExplicitRetrieve([string]$Code, [string]$OutFile) {
     elseif ($letter -eq '0') { $backendName = "litterbox" }
     elseif ($letter -eq '1') { $backendName = "catbox" }
     else {
-        Write-Error "wcp: '$Code' is not a valid code (unknown prefix '$letter')"
+        Warn "wcp: '$Code' is not a valid code (unknown prefix '$letter')"
         return $false
     }
 
@@ -492,7 +922,7 @@ function Do-ExplicitRetrieve([string]$Code, [string]$OutFile) {
 
     # Decode the code to get the ID
     if (-not (Decode-Code $Code)) {
-        Write-Error "wcp: '$Code' is not a valid code (unknown prefix '$letter')"
+        Warn "wcp: '$Code' is not a valid code (unknown prefix '$letter')"
         return $false
     }
 
@@ -504,9 +934,9 @@ function Do-ExplicitRetrieve([string]$Code, [string]$OutFile) {
         $ok = Invoke-Retrieve $fetchUrl $OutFile
     }
     if (-not $ok) {
-        Write-Error "wcp: no such code '$Code' ($backendName, $extStr)"
+        Warn "wcp: no such code '$Code' ($backendName, $extStr)"
         if ($backendName -eq "litterbox") {
-            Write-Error "wcp: litterbox codes expire - the default window is 1h"
+            Warn "wcp: litterbox codes expire - the default window is 1h"
         }
         return $false
     }
@@ -520,7 +950,7 @@ function Do-ExplicitRetrieve([string]$Code, [string]$OutFile) {
 $target = $null
 if ($rest.Count -gt 0 -and $rest[0] -eq ".") {
     if ($rest.Count -lt 2) {
-        Write-Error "wcp: . needs a code or URL, e.g. wcp . b0ojyr4"
+        Warn "wcp: . needs a code or URL, e.g. wcp . b0ojyr4"
         exit 1
     }
     $target = $rest[1]
@@ -531,7 +961,7 @@ if ($rest.Count -gt 0 -and $rest[0] -eq ".") {
 if ($target) {
     if ($target -match '^https?://') {
         if (-not (Invoke-Retrieve $target $OutFile)) {
-            Write-Error ("wcp: failed to fetch " + $target)
+            Warn ("wcp: failed to fetch " + $target)
             exit 1
         }
     } else {
@@ -588,7 +1018,7 @@ switch ($Backend) {
     "catbox"      { $DefaultHost = $DefaultUploadHostCatbox }
     "litterbox"   { $DefaultHost = $DefaultUploadHostLitterbox }
     default {
-        Write-Error "wcp: unknown backend: $Backend (expected: catbox, litterbox)"
+        Warn "wcp: unknown backend: $Backend (expected: catbox, litterbox)"
         exit 1
     }
 }
@@ -665,43 +1095,43 @@ function Dispatch([string]$Kind, [string]$Arg) {
 
 if ($DoPaste) {
     if ($rest.Count -gt 0) {
-        Write-Error "wcp: -v/--paste takes no arguments (it uploads the clipboard)"
+        Warn "wcp: -v/--paste takes no arguments (it uploads the clipboard)"
         exit 1
     }
     $clip = Get-Clipboard -Raw
     if ([string]::IsNullOrEmpty($clip)) {
-        Write-Error "wcp: clipboard is empty - nothing to upload"
+        Warn "wcp: clipboard is empty - nothing to upload"
         exit 1
     }
     $PasteContent = $clip
 }
 
 if ($KeyLen -lt 12 -or $KeyLen -gt 64) {
-    Write-Error "wcp: --key-len must be a whole number from 12 to 64 (default 12)"
+    Warn "wcp: --key-len must be a whole number from 12 to 64 (default 12)"
     exit 1
 }
 
 # Select the encryption mode for this upload.
 $MaxEncSize = 1048576
+$MaxForceSize = 104857600    # 100 MB, -f ceiling
 $Encrypt = $false
 if ($Plain) {
     $Encrypt = $false
 } elseif ($ForceEncrypt) {
-    Assert-OpenSsl
+    $Encrypt = $true
+} elseif ($StoredKey) {
     $Encrypt = $true
 } elseif ($Backend -eq "litterbox") {
     $Encrypt = $false
-} elseif ($OpenSslPath) {
-    $Encrypt = $true
 } else {
-    Write-Error "wcp: openssl not found - uploading to $Backend UNENCRYPTED"
-    Write-Error "wcp: install openssl, or pass --plain (-p) to silence this"
+    $Encrypt = $true
 }
 
 $key = $null
 $result = $null
 
-if ($Encrypt) {
+# Buffer modes encrypt inside their own block, not from $rest.
+if ($Encrypt -and -not $Send -and -not $Accum -and -not $Clear) {
     $plain = $null
     if ($DoPaste) {
         $plain = [System.Text.Encoding]::UTF8.GetBytes($PasteContent)
@@ -710,11 +1140,30 @@ if ($Encrypt) {
     } elseif ($rest.Count -eq 1 -and (Test-Path -LiteralPath $rest[0] -PathType Leaf)) {
         $fp = $rest[0]
         $bn = Split-Path -Leaf $fp
-        if ((Get-Item -LiteralPath $fp).Length -gt $MaxEncSize) {
-            $msg = " - over the 1 MB limit, uploading as-is"
-            Write-Error ("wcp: not encrypting " + $bn + $msg)
-            $Encrypt = $false
+        $fsize = (Get-Item -LiteralPath $fp).Length
+        if ($fsize -le $MaxEncSize) {
+            # encrypt normally
+        } elseif ($Force -and $fsize -le $MaxForceSize) {
+            $hsize = HumanSize $fsize
+            $upSize = HumanSize ($fsize * 4 / 3)
+            Warn ("wcp: encrypting $hsize" +
+                " - the upload will be about $upSize and may take a while")
+        } elseif ($Force) {
+            $hsize = HumanSize $fsize
+            $flimit = HumanSize $MaxForceSize
+            Warn ("wcp: -f cannot encrypt $bn" +
+                " - $hsize over the $flimit encrypted limit")
+            Warn "wcp: upload it without -f to send it unencrypted"
+            exit 1
         } else {
+            $hsize = HumanSize $fsize
+            $limit = HumanSize $MaxEncSize
+            Warn ("wcp: not encrypting $bn" +
+                " - $hsize over the $limit limit, uploading as-is")
+            Warn "wcp: pass -f to encrypt it anyway"
+            $Encrypt = $false
+        }
+        if ($Encrypt) {
             $hdr = [System.Text.Encoding]::UTF8.GetBytes("wcp-name:$bn`n")
             $body = [System.IO.File]::ReadAllBytes($fp)
             $plain = New-Object byte[] ($hdr.Length + $body.Length)
@@ -726,9 +1175,92 @@ if ($Encrypt) {
     }
 
     if ($Encrypt) {
-        $key = New-WcpKey $KeyLen
+        Select-Key
         $result = Dispatch "text" (Protect-Bytes $plain $key)
     }
+}
+
+# Accumulate / Send / Clear
+if ($Clear) {
+    if (Test-Path -LiteralPath $BufferPath) {
+        $entries = CountEntries $BufferPath
+        $sz = HumanSize (Get-Item $BufferPath).Length
+        Remove-Item $BufferPath -Force
+        [Console]::Out.WriteLine("wcp: buffer cleared ($(Format-Entries $entries), $sz)")
+    } else {
+        [Console]::Out.WriteLine("wcp: buffer cleared (0 entries, 0 B)")
+    }
+    exit 0
+}
+
+if ($Accum) {
+    if ($rest.Count -gt 0) {
+        # Argument text
+        $text = $rest -join ' '
+        $sep = if (Test-Path -LiteralPath $BufferPath) { "`n`n" } else { "" }
+        if (-not (Test-Path $BufferPath)) {
+            New-Item -ItemType Directory -Path (Split-Path $BufferPath) -Force | Out-Null
+        }
+        Add-Content -Path $BufferPath -Value ($sep + $text) -NoNewline:$false
+    } elseif ($DoPaste) {
+        # Clipboard
+        if (-not (Test-Path $BufferPath)) {
+            New-Item -ItemType Directory -Path (Split-Path $BufferPath) -Force | Out-Null
+        }
+        $sep = if (Test-Path -LiteralPath $BufferPath) { "`n`n" } else { "" }
+        Add-Content -Path $BufferPath -Value ($sep + $PasteContent) -NoNewline:$false
+    } elseif (-not [Console]::IsInputRedirected) {
+        Show-Buffer
+    } else {
+        # Stdin
+        $content = Read-PipedInput
+        if ([string]::IsNullOrEmpty($content)) {
+            Warn "wcp: nothing on stdin - nothing to accumulate"
+            exit 1
+        }
+        # There is no file(1) here, so a NUL byte is the only binary signal.
+        if ($content.Contains([char]0)) {
+            Warn "wcp: only text can be accumulated"
+            exit 1
+        }
+        if (-not (Test-Path $BufferPath)) {
+            New-Item -ItemType Directory -Path (Split-Path $BufferPath) -Force | Out-Null
+        }
+        $sep = if (Test-Path -LiteralPath $BufferPath) { "`n`n" } else { "" }
+        Add-Content -Path $BufferPath -Value ($sep + $content) -NoNewline:$false
+    }
+    exit 0
+}
+
+if ($Send) {
+    if (-not (Test-Path -LiteralPath $BufferPath)) {
+        Warn "wcp: buffer is empty - nothing to send"
+        exit 1
+    }
+    $bufferContent = Get-Content -Raw $BufferPath
+    if ([string]::IsNullOrWhiteSpace($bufferContent)) {
+        Warn "wcp: buffer is empty - nothing to send"
+        exit 1
+    }
+    $key = $null
+    if ($Encrypt) {
+        Select-Key
+        $plainBytes = [System.Text.Encoding]::UTF8.GetBytes($bufferContent)
+        $result = Dispatch "text" (Protect-Bytes $plainBytes $key)
+    } else {
+        $result = Dispatch "text" $bufferContent
+    }
+    if ($result -match '^https?://\S+$') {
+        $idFull = Get-IdFromUrl $result
+        EmitResult $idFull $Backend $EmitKey
+        Remove-Item $BufferPath -Force
+    } else {
+        Warn "wcp: upload failed on backend '$Backend' ($UploadHost)"
+        $reply = Describe-Reply $result
+        Warn "wcp: backend replied: $reply"
+        exit 1
+    }
+    exit 0
 }
 
 if (-not $result) {
@@ -744,39 +1276,11 @@ if (-not $result) {
 }
 
 if ($result -notmatch '^https?://\S+$') {
-    Write-Error "wcp: upload failed on backend '$Backend' ($UploadHost)"
-    $reply = $result
-    if (-not $reply) {
-        $reply = "<empty response>"
-    }
-    Write-Error "wcp: backend replied: $reply"
+    Warn "wcp: upload failed on backend '$Backend' ($UploadHost)"
+    $reply = Describe-Reply $result
+    Warn "wcp: backend replied: $reply"
     exit 1
 }
 
 $idFull = Get-IdFromUrl $result
-$code = Encode-Id $idFull $Backend
-if ($key) {
-    $code = $code + "-" + $key
-}
-
-Write-Output $code
-
-# Copy by default on a terminal; only -c reports when the clipboard is unusable.
-$wantCopy = $false
-if (-not $NoCopy) {
-    if ($DoCopy) {
-        $wantCopy = $true
-    } elseif (-not [Console]::IsOutputRedirected) {
-        $wantCopy = $true
-    }
-}
-
-if ($wantCopy) {
-    try {
-        $code | Set-Clipboard
-    } catch {
-        if ($DoCopy) {
-            Write-Error "wcp: -c could not reach the clipboard"
-        }
-    }
-}
+EmitResult $idFull $Backend $EmitKey

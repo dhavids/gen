@@ -207,8 +207,10 @@ retrieve_url() {
 clip_hint() {
   if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
     echo "wl-clipboard"
-  else
+  elif [[ -n "${DISPLAY:-}" ]]; then
     echo "xclip"
+  else
+    echo "a clipboard tool, but this session has no display"
   fi
 }
 
@@ -218,12 +220,10 @@ do_paste() {
     pbpaste
   elif [[ -n "${WAYLAND_DISPLAY:-}" ]] && command -v wl-paste &>/dev/null; then
     wl-paste --no-newline 2>/dev/null
-  elif command -v xclip &>/dev/null; then
+  elif [[ -n "${DISPLAY:-}" ]] && command -v xclip &>/dev/null; then
     xclip -selection clipboard -o 2>/dev/null
-  elif command -v xsel &>/dev/null; then
+  elif [[ -n "${DISPLAY:-}" ]] && command -v xsel &>/dev/null; then
     xsel --clipboard --output 2>/dev/null
-  elif command -v wl-paste &>/dev/null; then
-    wl-paste --no-newline 2>/dev/null
   else
     return 2
   fi
@@ -772,21 +772,24 @@ esac
 [[ -z "$HOST" ]] && HOST="$DEFAULT_HOST"
 HOST="${HOST%/}"
 
-# Redirect stdio: these fork a daemon that would hold our stdout open.
+# Match the tool to the session: a tool present for the wrong display server
+# cannot connect. Redirect stdio too, or the forked daemon holds our stdout.
 do_copy() {
-  local text="$1"
+  local text="$1" rc=0
   if command -v pbcopy &>/dev/null; then
-    printf '%s' "$text" | pbcopy >/dev/null 2>&1
+    printf '%s' "$text" | pbcopy >/dev/null 2>&1 || rc=$?
   elif [[ -n "${WAYLAND_DISPLAY:-}" ]] && command -v wl-copy &>/dev/null; then
-    printf '%s' "$text" | wl-copy >/dev/null 2>&1
-  elif command -v xclip &>/dev/null; then
-    printf '%s' "$text" | xclip -selection clipboard >/dev/null 2>&1
-  elif command -v xsel &>/dev/null; then
-    printf '%s' "$text" | xsel --clipboard --input >/dev/null 2>&1
-  elif command -v wl-copy &>/dev/null; then
-    printf '%s' "$text" | wl-copy >/dev/null 2>&1
+    printf '%s' "$text" | wl-copy >/dev/null 2>&1 || rc=$?
+  elif [[ -n "${DISPLAY:-}" ]] && command -v xclip &>/dev/null; then
+    printf '%s' "$text" | xclip -selection clipboard >/dev/null 2>&1 || rc=$?
+  elif [[ -n "${DISPLAY:-}" ]] && command -v xsel &>/dev/null; then
+    printf '%s' "$text" | xsel --clipboard --input >/dev/null 2>&1 || rc=$?
   else
-    echo "wcp: -c found no clipboard tool; install $(clip_hint)" >&2
+    echo "wcp: -c found no usable clipboard tool; install $(clip_hint)" >&2
+    return 0
+  fi
+  if [[ $rc -ne 0 ]]; then
+    echo "wcp: -c could not reach the clipboard (tool exited $rc)" >&2
   fi
 }
 

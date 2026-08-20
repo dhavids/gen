@@ -324,6 +324,7 @@ function Invoke-TestSheet([string]$Sheet) {
     # Errors go to [Console]::Error, which no in-process call can capture, so
     # each command runs wcp as a child and merges its streams.
     $script:WcpBin = $PSCommandPath
+    $script:WcpCmd = Join-Path (Split-Path -Parent $PSCommandPath) 'wcp.cmd'
     $pass = 0
     $fail = 0
     $out = ''
@@ -385,8 +386,12 @@ function Invoke-TestSheet([string]$Sheet) {
 
 # Spawn wcp as a child so its stderr is a real stream the sheet can capture.
 function wcp {
-    $ps = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $script:WcpBin)
-    $input | & powershell @ps @args 2>&1
+    if (Test-Path -LiteralPath $script:WcpCmd) {
+        $input | & $script:WcpCmd @args 2>&1
+    } else {
+        $ps = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $script:WcpBin)
+        $input | & powershell @ps @args 2>&1
+    }
 }
 
 # Show the buffer: head and tail only on a terminal, unless --full.
@@ -991,20 +996,47 @@ function Do-ExplicitRetrieve([string]$Code, [string]$OutFile) {
 
 # A leading dot, or -o on its own, both mean an explicit retrieval.
 $target = $null
+$retrievalKey = ""
 if ($rest.Count -gt 0 -and $rest[0] -eq ".") {
     if ($rest.Count -lt 2) {
         Warn "wcp: . needs a code or URL, e.g. wcp . b0ojyr4"
         exit 1
     }
     $target = $rest[1]
+    if ($rest.Count -gt 2) { $retrievalKey = $rest[2] }
 } elseif ($OutFile -and $rest.Count -eq 1) {
     $target = $rest[0]
 }
 
+# A key may also arrive in a URL fragment: accepted, never emitted.
+if ($target -and $target.Contains('#')) {
+    $bits = $target.Split('#')
+    $target = $bits[0]
+    if (-not $retrievalKey) { $retrievalKey = $bits[1] }
+}
+
+if ($retrievalKey -and $retrievalKey -notmatch '^[A-Za-z0-9]{12,64}$') {
+    Warn "wcp: that does not look like a key (expected 12-64 letters and digits)"
+    exit 1
+}
+
 if ($target) {
     if ($target -match '^https?://') {
-        if (-not (Invoke-Retrieve $target $OutFile)) {
+        if ($retrievalKey) {
+            if (-not (Invoke-EncryptedRetrieve $target $retrievalKey $OutFile)) {
+                exit 1
+            }
+        } elseif (-not (Invoke-Retrieve $target $OutFile)) {
             Warn ("wcp: failed to fetch " + $target)
+            exit 1
+        }
+    } elseif ($retrievalKey) {
+        # A bare code plus a key is the same thing as CODE-KEY.
+        if ($target.Contains('-')) {
+            Warn "wcp: '$target' already carries a key, so a second one is ambiguous"
+            exit 1
+        }
+        if (-not (Do-ExplicitRetrieve ($target + '-' + $retrievalKey) $OutFile)) {
             exit 1
         }
     } else {

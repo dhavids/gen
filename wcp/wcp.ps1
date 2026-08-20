@@ -43,6 +43,9 @@
 
 $ErrorActionPreference = "Stop"
 
+# Sync .NET's cwd with PowerShell's for relative paths discovery
+[System.IO.Directory]::SetCurrentDirectory($PWD.Path)
+
 $DefaultUploadHostCatbox = "https://catbox.moe/user/api.php"
 $DefaultFetchHostCatbox = "https://files.catbox.moe"
 $DefaultUploadHostLitterbox = "https://litterbox.catbox.moe/resources/internals/api.php"

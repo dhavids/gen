@@ -385,7 +385,8 @@ function Invoke-TestSheet([string]$Sheet) {
 
 # Spawn wcp as a child so its stderr is a real stream the sheet can capture.
 function wcp {
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $script:WcpBin @args 2>&1
+    $ps = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $script:WcpBin)
+    $input | & powershell @ps @args 2>&1
 }
 
 # Show the buffer: head and tail only on a terminal, unless --full.
@@ -733,11 +734,39 @@ $BufferPath = Join-Path (Join-Path $CacheRoot 'wcp') 'buffer'
 if ($env:WCP_KEY_LEN) { $KeyLen = [int]$env:WCP_KEY_LEN }
 $rest = @()
 
+# Expand bundled boolean flags, so -abc becomes -a -b -c.
+$ShortFlags = "cenpvhlfasz"
+$ValueFlags = "btko"
+$Argv = @()
+$sawDoubleDash = $false
+foreach ($a in $args) {
+    if ($sawDoubleDash) { $Argv += $a; continue }
+    if ($a -eq "--") { $sawDoubleDash = $true; $Argv += $a; continue }
+    if ($a -cmatch '^-[a-zA-Z]{2,}$') {
+        $chars = $a.Substring(1).ToCharArray()
+        $allShort = $true
+        $anyValue = $false
+        foreach ($c in $chars) {
+            if ($ShortFlags.IndexOf($c) -lt 0) { $allShort = $false }
+            if ($ValueFlags.IndexOf($c) -ge 0) { $anyValue = $true }
+        }
+        if ($anyValue) {
+            Warn "wcp: -b, -t, -k and -o take a value and cannot be bundled (got '$a')"
+            exit 1
+        }
+        if ($allShort) {
+            foreach ($c in $chars) { $Argv += "-$c" }
+            continue
+        }
+    }
+    $Argv += $a
+}
+
 $i = 0
-while ($i -lt $args.Count) {
-    $a = $args[$i]
+while ($i -lt $Argv.Count) {
+    $a = $Argv[$i]
     if ($a -eq "-b" -or $a -eq "--backend") {
-        $val = $args[$i + 1]
+        $val = $Argv[$i + 1]
         switch ($val) {
             "c" { $Backend = "catbox" }
             "catbox" { $Backend = "catbox" }
@@ -757,15 +786,15 @@ while ($i -lt $args.Count) {
         }
         $i += 1
     } elseif ($a -eq "--host") {
-        $UploadHost = $args[$i + 1]; $i += 2
+        $UploadHost = $Argv[$i + 1]; $i += 2
     } elseif ($a -like "--host=*") {
         $UploadHost = $a.Substring(7); $i += 1
     } elseif ($a -eq "-t") {
-        $LbHours = $args[$i + 1]; $i += 2
+        $LbHours = $Argv[$i + 1]; $i += 2
     } elseif ($a -like "-t=*") {
         $LbHours = $a.Substring(3); $i += 1
     } elseif ($a -eq "--time") {
-        $LbHours = $args[$i + 1]; $i += 2
+        $LbHours = $Argv[$i + 1]; $i += 2
     } elseif ($a -like "--time=*") {
         $LbHours = $a.Substring(7); $i += 1
     } elseif ($a -eq "--copy" -or $a -eq "-c") {
@@ -775,9 +804,9 @@ while ($i -lt $args.Count) {
     } elseif ($a -eq "-v" -or $a -eq "--paste") {
         $DoPaste = $true; $i += 1
     } elseif ($a -eq "-k" -or $a -eq "--key-len") {
-        $KeyLen = [int]$args[$i + 1]; $i += 2
+        $KeyLen = [int]$Argv[$i + 1]; $i += 2
     } elseif ($a -eq "-o" -or $a -eq "--output") {
-        $OutFile = $args[$i + 1]; $i += 2
+        $OutFile = $Argv[$i + 1]; $i += 2
     } elseif ($a -eq "-h" -or $a -eq "--help") {
         Show-Usage
         exit 0
@@ -799,16 +828,16 @@ while ($i -lt $args.Count) {
         $Full = $true; $i += 1
     } elseif ($a -eq "--run-tests") {
         $RunTests = $true; $i += 1
-        if ($i -lt $args.Count -and -not $args[$i].StartsWith("-")) {
-            $TestSheet = $args[$i]; $i += 1
+        if ($i -lt $Argv.Count -and -not $Argv[$i].StartsWith("-")) {
+            $TestSheet = $Argv[$i]; $i += 1
         }
     } elseif ($a -eq "-z" -or $a -eq "--no-stored-key") {
         $NoKey = $true; $i += 1
     } elseif ($a -eq "--set-key") {
         $DoSetKey = $true; $i += 1
         # Optional value: only take a token that is not itself a flag.
-        if ($i -lt $args.Count -and -not $args[$i].StartsWith("-")) {
-            $SetKeyValue = $args[$i]; $i += 1
+        if ($i -lt $Argv.Count -and -not $Argv[$i].StartsWith("-")) {
+            $SetKeyValue = $Argv[$i]; $i += 1
         }
     } elseif ($a -like "--set-key=*") {
         $DoSetKey = $true
@@ -817,6 +846,9 @@ while ($i -lt $args.Count) {
         $DoGetKey = $true; $i += 1
     } elseif ($a -eq "--clear-key") {
         $DoClearKey = $true; $i += 1
+    } elseif ($a -eq "--") {
+        $i += 1
+        while ($i -lt $Argv.Count) { $rest += $Argv[$i]; $i += 1 }
     } else {
         $rest += $a; $i += 1
     }

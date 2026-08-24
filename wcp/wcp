@@ -401,14 +401,28 @@ run_tests() {
   {
     printf '%s\n' 'WCP_PASS=0; WCP_FAIL=0; WCP_OUT=""'
     printf '%s\n' 'wcp() { command "$WCP_BIN" "$@"; }'
-    printf '%s\n' 'wcp_run() { { eval "$1"; } >"$WCP_TMP" 2>&1 </dev/null; WCP_OUT="$(cat "$WCP_TMP")"; }'
+    printf '%s\n' 'wcp_run() {'
+    printf '%s\n' '  { eval "$1"; } >"$WCP_TMP" 2>&1 </dev/null'
+    printf '%s\n' '  WCP_OUT="$(cat "$WCP_TMP")"'
+    printf '%s\n' '}'
+    printf '%s\n' 'wcp_fail() {'
+    printf '%s\n' '  WCP_FAIL=$((WCP_FAIL+1))'
+    printf '%s\n' '  printf "  FAIL %s\\n" "$1"'
+    printf '%s\n' '  printf "       got: %s\\n" "${WCP_OUT:0:70}"'
+    printf '%s\n' '}'
     printf '%s\n' 'wcp_expect() {'
     printf '%s\n' '  if [[ "$1" == re ]]; then'
-    printf '%s\n' '    if [[ "$WCP_OUT" =~ $2 ]]; then WCP_PASS=$((WCP_PASS+1));'
-    printf '%s\n' '    else WCP_FAIL=$((WCP_FAIL+1)); printf "  FAIL %s\\n       got: %s\\n" "$2" "${WCP_OUT:0:70}"; fi'
+    printf '%s\n' '    if [[ "$WCP_OUT" =~ $2 ]]; then'
+    printf '%s\n' '      WCP_PASS=$((WCP_PASS+1))'
+    printf '%s\n' '    else'
+    printf '%s\n' '      wcp_fail "$2"'
+    printf '%s\n' '    fi'
     printf '%s\n' '  else'
-    printf '%s\n' '    if [[ "$WCP_OUT" == *"$2"* ]]; then WCP_PASS=$((WCP_PASS+1));'
-    printf '%s\n' '    else WCP_FAIL=$((WCP_FAIL+1)); printf "  FAIL %s\\n       got: %s\\n" "$2" "${WCP_OUT:0:70}"; fi'
+    printf '%s\n' '    if [[ "$WCP_OUT" == *"$2"* ]]; then'
+    printf '%s\n' '      WCP_PASS=$((WCP_PASS+1))'
+    printf '%s\n' '    else'
+    printf '%s\n' '      wcp_fail "$2"'
+    printf '%s\n' '    fi'
     printf '%s\n' '  fi'
     printf '%s\n' '}'
     while IFS= read -r line; do
@@ -514,6 +528,7 @@ unique_save_name() {
 }
 
 # Name the pipeline feeding stdin, from the parent shell's child list.
+# Method from https://stackoverflow.com/questions/52358661
 pipe_writer_cmd() {
   [[ -p /dev/stdin ]] || return 0
   local childfile="/proc/$PPID/task/$PPID/children"

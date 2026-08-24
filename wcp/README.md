@@ -194,3 +194,13 @@ PowerShell pipeline passes objects inside one process.
 - `WCP_PLAIN` — set to `1` to disable encryption
 - `WCP_KEY_LEN` — generated key length (default: 12)
 - `WCP_NO_COPY` — set to `1` to never touch the clipboard
+
+## Thanks
+
+`wcp` is a thin wrapper around someone else's hard work. The hosting is entirely
+[catbox](https://catbox.moe) and [litterbox](https://litterbox.catbox.moe), both run
+by the same operator, free, without accounts, and without ads. This tool would not
+exist without them.
+
+Please use them gently: keep uploads small, do not automate bulk transfers, and
+consider [supporting them](https://catbox.moe/support.php) if you find `wcp` useful.

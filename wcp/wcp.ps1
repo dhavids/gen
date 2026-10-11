@@ -436,7 +436,9 @@ function Invoke-Update {
         return 1
     }
 
-    $installedCmd = Get-Command wcp -ErrorAction SilentlyContinue
+    # -CommandType Application skips the script's own test-harness `wcp`
+    # function, which shadows the real command and has no file path.
+    $installedCmd = Get-Command wcp -CommandType Application -ErrorAction SilentlyContinue
     if (-not $installedCmd) {
         Warn "wcp: wcp is not on your PATH yet - run setup.ps1 first"
         return 1
@@ -451,7 +453,7 @@ function Invoke-Update {
     $srcResolved = (Resolve-Path -LiteralPath $srcFile).Path
     $installedResolved = (Resolve-Path -LiteralPath $installedFile).Path
     if ($srcResolved -eq $installedResolved) {
-        Warn "wcp: already running the installed copy - run --update from the repo instead"
+        Warn "wcp: already running the installed copy - run --update from the repo"
         Warn "wcp: example: cd C:\path\to\wcp-repo; .\wcp.ps1 --update"
         return 1
     }
@@ -468,7 +470,8 @@ function Invoke-Update {
 
     $srcTests = Join-Path $srcDir 'tests.md'
     if (Test-Path -LiteralPath $srcTests) {
-        Copy-Item -LiteralPath $srcTests -Destination (Join-Path $installedDir 'tests.md') -Force
+        $installedTests = Join-Path $installedDir 'tests.md'
+        Copy-Item -LiteralPath $srcTests -Destination $installedTests -Force
     }
     return 0
 }

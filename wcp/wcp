@@ -510,7 +510,7 @@ run_update() {
   installed_real="$(readlink -f "$installed")"
 
   if [[ "$installed_real" == "$src_wcp" ]]; then
-    print_error "already running the installed copy — run --update from the repo instead"
+    print_error "already running the installed copy — run --update from the repo"
     print_error "example: cd /path/to/wcp-repo && ./wcp --update"
     return 1
   fi

@@ -87,6 +87,11 @@ $DefaultUploadHostLitterbox = "https://litterbox.catbox.moe/resources/internals/
 $DefaultFetchHostLitterbox = "https://litter.catbox.moe"
 $DefaultLitterboxTime = "1h"
 
+# Caps how long a hung/blocked backend can stall wcp before it fails.
+$CurlConnectTimeout = "10"
+$CurlMaxTime = "30"
+$CurlUploadMaxTime = "300"
+
 # Extension table: index 0 = no extension, 1..14 = common extensions.
 $ExtTable = @("", "txt", "md", "log", "json", "yaml", "csv", "conf",
               "sh", "py", "png", "jpg", "pdf", "zip", "gz")
@@ -418,6 +423,56 @@ function Invoke-TestSheet([string]$Sheet) {
     return 1
 }
 
+
+# Self Update
+
+# Copy this script's own repo copy over whatever wcp.ps1 is already on PATH.
+function Invoke-Update {
+    $srcDir = Split-Path -Parent $PSCommandPath
+    $srcFile = Join-Path $srcDir 'wcp.ps1'
+    if (-not (Test-Path -LiteralPath $srcFile)) {
+        Warn "wcp: no 'wcp.ps1' source file found next to this script ($srcDir)"
+        Warn "wcp: run this from inside the pulled wcp repo, e.g. .\wcp.ps1 --update"
+        return 1
+    }
+
+    $installedCmd = Get-Command wcp -ErrorAction SilentlyContinue
+    if (-not $installedCmd) {
+        Warn "wcp: wcp is not on your PATH yet - run setup.ps1 first"
+        return 1
+    }
+    $installedDir = Split-Path -Parent $installedCmd.Source
+    $installedFile = Join-Path $installedDir 'wcp.ps1'
+    if (-not (Test-Path -LiteralPath $installedFile)) {
+        Warn "wcp: could not find wcp.ps1 next to $($installedCmd.Source)"
+        return 1
+    }
+
+    $srcResolved = (Resolve-Path -LiteralPath $srcFile).Path
+    $installedResolved = (Resolve-Path -LiteralPath $installedFile).Path
+    if ($srcResolved -eq $installedResolved) {
+        Warn "wcp: already running the installed copy - run --update from the repo instead"
+        Warn "wcp: example: cd C:\path\to\wcp-repo; .\wcp.ps1 --update"
+        return 1
+    }
+
+    $srcHash = (Get-FileHash -LiteralPath $srcFile -Algorithm SHA256).Hash
+    $installedHash = (Get-FileHash -LiteralPath $installedFile -Algorithm SHA256).Hash
+    if ($srcHash -eq $installedHash) {
+        [Console]::Out.WriteLine("wcp: already up to date: $installedFile")
+        return 0
+    }
+
+    Copy-Item -LiteralPath $srcFile -Destination $installedFile -Force
+    [Console]::Out.WriteLine("wcp: updated: $installedFile")
+
+    $srcTests = Join-Path $srcDir 'tests.md'
+    if (Test-Path -LiteralPath $srcTests) {
+        Copy-Item -LiteralPath $srcTests -Destination (Join-Path $installedDir 'tests.md') -Force
+    }
+    return 0
+}
+
 # Spawn wcp as a child so its stderr is a real stream the sheet can capture.
 function wcp {
     $ErrorActionPreference = 'Continue'
@@ -628,7 +683,8 @@ function Invoke-EncryptedRetrieve([string]$Url, [string]$Key, [string]$OutFile) 
     $ErrorActionPreference = 'Continue'
     $bodyFile = New-TempPath
     try {
-        $status = & curl.exe -sSL -o $bodyFile -w '%{http_code}' $Url
+        $status = & curl.exe -sSL --connect-timeout $CurlConnectTimeout `
+            --max-time $CurlMaxTime -o $bodyFile -w '%{http_code}' $Url
         if ([int]$status -ge 400) { return $false }
         $plain = Unprotect-Bytes ([System.IO.File]::ReadAllText($bodyFile)) $Key
         if ($null -eq $plain) {
@@ -667,7 +723,8 @@ function Invoke-Retrieve([string]$Url, [string]$OverrideOut) {
     $hdrFile = [System.IO.Path]::GetTempFileName()
     $bodyFile = [System.IO.Path]::GetTempFileName()
     try {
-        $httpCode = & curl.exe -sSL -D $hdrFile -o $bodyFile -w '%{http_code}' $Url
+        $httpCode = & curl.exe -sSL --connect-timeout $CurlConnectTimeout `
+            --max-time $CurlMaxTime -D $hdrFile -o $bodyFile -w '%{http_code}' $Url
         if ([int]$httpCode -ge 400) {
             return $false
         }
@@ -738,6 +795,8 @@ Options:
       --full             with -a, show the whole buffer, not head and tail
       --run-tests [file] run the blocks in tests.md and report pass/fail
                          WCP_TEST_DELAY sets the gap between commands (default 1s)
+      --update           copy this repo's wcp.ps1 over the installed one on PATH
+                         run from the repo, e.g. .\wcp.ps1 --update, after a pull
   -v, --paste            upload the clipboard contents (takes no arguments)
   -h, --help             show this help
 
@@ -776,6 +835,7 @@ $Clear = $false
 $Full = $false
 $RunTests = $false
 $TestSheet = ""
+$DoUpdate = $false
 $NoKey = $false
 $DoSetKey = $false
 $SetKeyValue = ""
@@ -886,6 +946,8 @@ while ($i -lt $Argv.Count) {
         if ($i -lt $Argv.Count -and -not $Argv[$i].StartsWith("-")) {
             $TestSheet = $Argv[$i]; $i += 1
         }
+    } elseif ($a -eq "--update") {
+        $DoUpdate = $true; $i += 1
     } elseif ($a -eq "-z" -or $a -eq "--no-stored-key") {
         $NoKey = $true; $i += 1
     } elseif ($a -eq "--set-key") {
@@ -914,6 +976,10 @@ if ($env:WCP_PLAIN -eq "1") { $Plain = $true }
 if ($Accum -and $Send) {
     Warn "wcp: -a and -s do opposite things"
     exit 1
+}
+
+if ($DoUpdate) {
+    exit (Invoke-Update)
 }
 
 # Checked after parsing, so --help still works on a bare machine.
@@ -1164,13 +1230,15 @@ function Upload-Catbox([string]$Kind, [string]$Arg) {
     $ErrorActionPreference = 'Continue'
     switch ($Kind) {
         "file"  {
-            return & curl.exe -sS -F "reqtype=fileupload" `
+            return & curl.exe -sS --connect-timeout $CurlConnectTimeout `
+                --max-time $CurlUploadMaxTime -F "reqtype=fileupload" `
                 -F "fileToUpload=@$Arg" $UploadHost
         }
         "text"  {
             $tmp = Write-TempFile $Arg
             try {
-                return & curl.exe -sS -F "reqtype=fileupload" `
+                return & curl.exe -sS --connect-timeout $CurlConnectTimeout `
+                    --max-time $CurlUploadMaxTime -F "reqtype=fileupload" `
                     -F "fileToUpload=@$tmp" $UploadHost
             }
             finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
@@ -1179,7 +1247,8 @@ function Upload-Catbox([string]$Kind, [string]$Arg) {
             $content = Read-PipedInput
             $tmp = Write-TempFile $content
             try {
-                return & curl.exe -sS -F "reqtype=fileupload" `
+                return & curl.exe -sS --connect-timeout $CurlConnectTimeout `
+                    --max-time $CurlUploadMaxTime -F "reqtype=fileupload" `
                     -F "fileToUpload=@$tmp" $UploadHost
             }
             finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
@@ -1192,14 +1261,16 @@ function Upload-Litterbox([string]$Kind, [string]$Arg) {
     $ErrorActionPreference = 'Continue'
     switch ($Kind) {
         "file"  {
-            return & curl.exe -sS -F "reqtype=fileupload" -F "time=$LbTime" `
-                -F "fileToUpload=@$Arg" $UploadHost
+            return & curl.exe -sS --connect-timeout $CurlConnectTimeout `
+                --max-time $CurlUploadMaxTime -F "reqtype=fileupload" `
+                -F "time=$LbTime" -F "fileToUpload=@$Arg" $UploadHost
         }
         "text"  {
             $tmp = Write-TempFile $Arg
             try {
-                return & curl.exe -sS -F "reqtype=fileupload" -F "time=$LbTime" `
-                    -F "fileToUpload=@$tmp" $UploadHost
+                return & curl.exe -sS --connect-timeout $CurlConnectTimeout `
+                    --max-time $CurlUploadMaxTime -F "reqtype=fileupload" `
+                    -F "time=$LbTime" -F "fileToUpload=@$tmp" $UploadHost
             }
             finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
         }
@@ -1207,8 +1278,9 @@ function Upload-Litterbox([string]$Kind, [string]$Arg) {
             $content = Read-PipedInput
             $tmp = Write-TempFile $content
             try {
-                return & curl.exe -sS -F "reqtype=fileupload" -F "time=$LbTime" `
-                    -F "fileToUpload=@$tmp" $UploadHost
+                return & curl.exe -sS --connect-timeout $CurlConnectTimeout `
+                    --max-time $CurlUploadMaxTime -F "reqtype=fileupload" `
+                    -F "time=$LbTime" -F "fileToUpload=@$tmp" $UploadHost
             }
             finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
         }

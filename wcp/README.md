@@ -75,6 +75,20 @@ When editing the Windows `PATH` by hand, read the **User**-scoped value, not
 `$env:Path` — that is the combined machine+user value, and writing it back duplicates
 your whole system PATH into your user variable.
 
+### Updating
+
+Once installed, after pulling a newer `wcp`, re-run `setup`/`setup.ps1` only if you need
+the PATH wiring redone. Otherwise, from inside the repo:
+
+```bash
+./wcp --update                                          # Linux, macOS, WSL
+.\wcp.ps1 --update                                      # Windows
+```
+
+This finds the already-installed copy via `PATH` and overwrites it with the repo's
+version (and `tests.md` alongside it), without touching your shell profile or PATH
+again. It refuses to run from the installed copy itself — run it from the pulled repo.
+
 ## How the code works
 
 The first character encodes the backend and the extension together. Lowercase is

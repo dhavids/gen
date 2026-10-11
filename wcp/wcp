@@ -80,6 +80,11 @@ readonly DEFAULT_UPLOAD_HOST_LITTERBOX="https://litterbox.catbox.moe${LB_API}"
 readonly DEFAULT_FETCH_HOST_LITTERBOX="https://litter.catbox.moe"
 readonly DEFAULT_LITTERBOX_TIME="1h"
 
+# Caps how long a hung/blocked backend can stall wcp before it fails.
+readonly CURL_CONNECT_TIMEOUT=10
+readonly CURL_MAX_TIME=30
+readonly CURL_UPLOAD_MAX_TIME=300
+
 # Extension table: index 0 = no extension, 1..14 = common extensions.
 readonly -a EXT_TABLE=( "" txt md log json yaml csv conf sh py png jpg pdf zip gz )
 
@@ -204,7 +209,8 @@ retrieve_url() {
   local hdrfile bodyfile ctype http_code
   hdrfile="$(mktemp)"
   bodyfile="$(mktemp)"
-  http_code="$(curl -sSL -D "$hdrfile" -o "$bodyfile" -w '%{http_code}' "$url")"
+  http_code="$(curl -sSL --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+    --max-time "$CURL_MAX_TIME" -D "$hdrfile" -o "$bodyfile" -w '%{http_code}' "$url")"
 
   if [[ "$http_code" -ge 400 ]]; then
     rm -f "$hdrfile" "$bodyfile"
@@ -482,6 +488,48 @@ run_tests() {
   return $rc
 }
 
+
+# Self Update
+
+# Copy this script's own repo copy over whatever wcp is already on PATH.
+run_update() {
+  local src_dir src_wcp installed installed_real
+  src_dir="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+  src_wcp="$src_dir/wcp"
+  if [[ ! -r "$src_wcp" ]]; then
+    print_error "no 'wcp' source file found next to this script ($src_dir)"
+    print_error "run this from inside the pulled wcp repo, e.g. ./wcp --update"
+    return 1
+  fi
+
+  installed="$(command -v wcp 2>/dev/null || true)"
+  if [[ -z "$installed" ]]; then
+    print_error "wcp is not on your PATH yet — run 'bash setup' first"
+    return 1
+  fi
+  installed_real="$(readlink -f "$installed")"
+
+  if [[ "$installed_real" == "$src_wcp" ]]; then
+    print_error "already running the installed copy — run --update from the repo instead"
+    print_error "example: cd /path/to/wcp-repo && ./wcp --update"
+    return 1
+  fi
+
+  if cmp -s "$src_wcp" "$installed_real"; then
+    print_info "already up to date: $installed_real"
+    return 0
+  fi
+
+  cp "$src_wcp" "$installed_real"
+  chmod +x "$installed_real"
+  print_info "updated: $installed_real"
+
+  if [[ -r "$src_dir/tests.md" ]]; then
+    cp "$src_dir/tests.md" "$(dirname "$installed_real")/tests.md"
+  fi
+  return 0
+}
+
 # Show the buffer: head and tail only on a terminal, unless --full.
 show_buffer() {
   if [[ ! -f "$BUFFER_PATH" || ! -s "$BUFFER_PATH" ]]; then
@@ -671,6 +719,8 @@ Options:
       --full             with -a, show the whole buffer, not head and tail
       --run-tests [file] run the blocks in tests.md and report pass/fail
                          WCP_TEST_DELAY sets the gap between commands (default 1s)
+      --update           copy this repo's wcp over the installed one on PATH
+                         run from the repo, e.g. ./wcp --update, after a pull
   -v, --paste            upload the clipboard contents (takes no arguments)
   -z, --no-stored-key    ignore the stored key for this run
   -h, --help             show this help
@@ -717,6 +767,7 @@ CLEAR=0
 FULL=0
 DO_RUN_TESTS=0
 TEST_SHEET=""
+DO_UPDATE=0
 NOKEY=0
 SET_KEY=""
 DO_SET_KEY=0
@@ -870,6 +921,10 @@ parse_args() {
           TEST_SHEET="$1"
           shift
         fi
+        ;;
+      --update)
+        DO_UPDATE=1
+        shift
         ;;
       -z|--no-stored-key)
         NOKEY=1
@@ -1077,7 +1132,8 @@ do_explicit_retrieve() {
     local hdrfile bodyfile http_code
     hdrfile="$(mktemp)"
     bodyfile="$(mktemp)"
-    http_code="$(curl -sSL -D "$hdrfile" -o "$bodyfile" \
+    http_code="$(curl -sSL --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+      --max-time "$CURL_MAX_TIME" -D "$hdrfile" -o "$bodyfile" \
       -w '%{http_code}' "${fetch_host%/}/${DECODED_ID}")"
     if [[ "$http_code" -ge 400 ]]; then
       rm -f "$hdrfile" "$bodyfile"
@@ -1132,7 +1188,9 @@ try_retrieval() {
       if [[ -n "$retrieval_key" ]]; then
         hdrfile="$(mktemp)"
         bodyfile="$(mktemp)"
-        http_code="$(curl -sSL -D "$hdrfile" -o "$bodyfile" -w '%{http_code}' "$target")"
+        http_code="$(curl -sSL --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+          --max-time "$CURL_MAX_TIME" -D "$hdrfile" -o "$bodyfile" \
+          -w '%{http_code}' "$target")"
         if [[ "$http_code" -ge 400 ]]; then
           rm -f "$hdrfile" "$bodyfile"
           print_error "failed to fetch $target"
@@ -1238,7 +1296,8 @@ try_retrieval() {
           check_openssl
           enc_hdrfile="$(mktemp)"
           enc_bodyfile="$(mktemp)"
-          enc_http_code="$(curl -sSL -D "$enc_hdrfile" -o "$enc_bodyfile" \
+          enc_http_code="$(curl -sSL --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+            --max-time "$CURL_MAX_TIME" -D "$enc_hdrfile" -o "$enc_bodyfile" \
             -w '%{http_code}' "${FETCH_HOST%/}/${DECODED_ID}")"
           if [[ "$enc_http_code" -ge 400 ]]; then
             rm -f "$enc_hdrfile" "$enc_bodyfile"
@@ -1273,7 +1332,8 @@ try_retrieval() {
           check_openssl
           enc_hdrfile="$(mktemp)"
           enc_bodyfile="$(mktemp)"
-          enc_http_code="$(curl -sSL -D "$enc_hdrfile" -o "$enc_bodyfile" \
+          enc_http_code="$(curl -sSL --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+            --max-time "$CURL_MAX_TIME" -D "$enc_hdrfile" -o "$enc_bodyfile" \
             -w '%{http_code}' "${FETCH_HOST%/}/${DECODED_ID}")"
           if [[ "$enc_http_code" -ge 400 ]]; then
             rm -f "$enc_hdrfile" "$enc_bodyfile"
@@ -1399,39 +1459,46 @@ try_retrieval() {
 
 # Backends
 
-up_catbox_file()  { curl -sS -F "reqtype=fileupload" -F "fileToUpload=@${1}" "$HOST"; }
+up_catbox_file() {
+  curl -sS --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_UPLOAD_MAX_TIME" \
+    -F "reqtype=fileupload" -F "fileToUpload=@${1}" "$HOST"
+}
 up_catbox_text() {
   local tmp
   tmp="$(mktemp /tmp/wcp-paste.XXXXXX.txt)"
   printf '%s' "$1" > "$tmp"
-  curl -sS -F "reqtype=fileupload" -F "fileToUpload=@${tmp}" "$HOST"
+  curl -sS --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_UPLOAD_MAX_TIME" \
+    -F "reqtype=fileupload" -F "fileToUpload=@${tmp}" "$HOST"
   rm -f "$tmp"
 }
 up_catbox_stdin() {
   local tmp
   tmp="$(mktemp /tmp/wcp-paste.XXXXXX.txt)"
   cat > "$tmp"
-  curl -sS -F "reqtype=fileupload" -F "fileToUpload=@${tmp}" "$HOST"
+  curl -sS --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_UPLOAD_MAX_TIME" \
+    -F "reqtype=fileupload" -F "fileToUpload=@${tmp}" "$HOST"
   rm -f "$tmp"
 }
 
 # backend: litterbox (POST, multipart reqtype=fileupload + time)
 up_litterbox_file() {
-  curl -sS -F "reqtype=fileupload" -F "time=${LBTIME}" \
-    -F "fileToUpload=@${1}" "$HOST"
+  curl -sS --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_UPLOAD_MAX_TIME" \
+    -F "reqtype=fileupload" -F "time=${LBTIME}" -F "fileToUpload=@${1}" "$HOST"
 }
 up_litterbox_text() {
   local tmp
   tmp="$(mktemp /tmp/wcp-paste.XXXXXX.txt)"
   printf '%s' "$1" > "$tmp"
-  curl -sS -F "reqtype=fileupload" -F "time=${LBTIME}" -F "fileToUpload=@${tmp}" "$HOST"
+  curl -sS --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_UPLOAD_MAX_TIME" \
+    -F "reqtype=fileupload" -F "time=${LBTIME}" -F "fileToUpload=@${tmp}" "$HOST"
   rm -f "$tmp"
 }
 up_litterbox_stdin() {
   local tmp
   tmp="$(mktemp /tmp/wcp-paste.XXXXXX.txt)"
   cat > "$tmp"
-  curl -sS -F "reqtype=fileupload" -F "time=${LBTIME}" -F "fileToUpload=@${tmp}" "$HOST"
+  curl -sS --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_UPLOAD_MAX_TIME" \
+    -F "reqtype=fileupload" -F "time=${LBTIME}" -F "fileToUpload=@${tmp}" "$HOST"
   rm -f "$tmp"
 }
 
@@ -1698,6 +1765,12 @@ do_upload() {
 
 main() {
   parse_args "$@"
+
+  if [[ $DO_UPDATE -eq 1 ]]; then
+    run_update
+    exit $?
+  fi
+
   require_tools
 
   if [[ $DO_RUN_TESTS -eq 1 ]]; then

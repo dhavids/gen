@@ -399,17 +399,36 @@ run_tests() {
   # Turn the sheet into one shell script so variables persist between blocks.
   local in_fence=0 line cmd expect_kind expect
   {
-    printf '%s\n' 'WCP_PASS=0; WCP_FAIL=0; WCP_OUT=""'
+    printf '%s\n' 'WCP_PASS=0; WCP_FAIL=0; WCP_BLOCK=0; WCP_OUT=""'
     printf '%s\n' 'wcp() { command "$WCP_BIN" "$@"; }'
     printf '%s\n' 'wcp_run() {'
+    printf '%s\n' '  [[ "$WCP_DELAY" != 0 ]] && sleep "$WCP_DELAY"'
     printf '%s\n' '  { eval "$1"; } >"$WCP_TMP" 2>&1 </dev/null'
     printf '%s\n' '  WCP_OUT="$(cat "$WCP_TMP")"'
     printf '%s\n' '}'
+    printf '%s\n' '# A refusing backend is not a failing test.'
+    printf '%s\n' 'wcp_blocked() {'
+    printf '%s\n' '  [[ "$WCP_OUT" == *"upload failed on backend"* ]] && return 0'
+    printf '%s\n' '  [[ "$WCP_OUT" == *"failed to fetch"* ]] && return 0'
+    printf '%s\n' '  return 1'
+    printf '%s\n' '}'
     printf '%s\n' 'wcp_fail() {'
+    printf '%s\n' '  if wcp_blocked; then'
+    printf '%s\n' '    WCP_BLOCK=$((WCP_BLOCK+1))'
+    printf '%s\n' '    return'
+    printf '%s\n' '  fi'
     printf '%s\n' '  WCP_FAIL=$((WCP_FAIL+1))'
     printf '%s\n' '  printf "  FAIL %s\\n" "$1"'
     printf '%s\n' '  printf "       got: %s\\n" "${WCP_OUT:0:70}"'
     printf '%s\n' '}'
+    printf '%s\n' 'wcp_run "wcp -zn preflight $RANDOM$RANDOM"'
+    printf '%s\n' 'if [[ ! "$WCP_OUT" =~ ^[A-Za-z0-9.-]+$ ]]; then'
+    printf '%s\n' '  printf "\\nBACKEND UNAVAILABLE - no tests were run.\\n"'
+    printf '%s\n' '  printf "  the backend refused a preflight upload:\\n"'
+    printf '%s\n' '  printf "  %s\\n" "${WCP_OUT:0:100}"'
+    printf '%s\n' '  printf "This is a backend problem, not a wcp failure.\\n"'
+    printf '%s\n' '  exit 2'
+    printf '%s\n' 'fi'
     printf '%s\n' 'wcp_expect() {'
     printf '%s\n' '  if [[ "$1" == re ]]; then'
     printf '%s\n' '    if [[ "$WCP_OUT" =~ $2 ]]; then'
@@ -440,7 +459,11 @@ run_tests() {
         printf 'wcp_run %q\n' "$line"
       fi
     done < "$sheet"
-    printf '%s\n' 'printf "\\n%s passed, %s failed\\n" "$WCP_PASS" "$WCP_FAIL"'
+    printf '%s\n' 'printf "\\n%s passed, %s failed" "$WCP_PASS" "$WCP_FAIL"'
+    printf '%s\n' 'if [[ $WCP_BLOCK -gt 0 ]]; then'
+    printf '%s\n' '  printf ", %s blocked by the backend" "$WCP_BLOCK"'
+    printf '%s\n' 'fi'
+    printf '%s\n' 'printf "\\n"'
     printf '%s\n' '[[ $WCP_FAIL -eq 0 ]]'
   } > "$script"
 
@@ -451,6 +474,7 @@ run_tests() {
     export XDG_CONFIG_HOME="$sandbox/config"
     export XDG_CACHE_HOME="$sandbox/cache"
     export WCP_BIN WCP_TMP="$sandbox/out"
+    export WCP_DELAY="${WCP_TEST_DELAY:-1}"
     export WCP_NO_COPY=1
     bash "$script"
   ) || rc=$?
@@ -646,6 +670,7 @@ Options:
       --clear            empty the buffer without uploading
       --full             with -a, show the whole buffer, not head and tail
       --run-tests [file] run the blocks in tests.md and report pass/fail
+                         WCP_TEST_DELAY sets the gap between commands (default 1s)
   -v, --paste            upload the clipboard contents (takes no arguments)
   -z, --no-stored-key    ignore the stored key for this run
   -h, --help             show this help

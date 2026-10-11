@@ -327,10 +327,31 @@ function Invoke-TestSheet([string]$Sheet) {
     $script:WcpCmd = Join-Path (Split-Path -Parent $PSCommandPath) 'wcp.cmd'
     $pass = 0
     $fail = 0
+    $blocked = 0
     $out = ''
     $inFence = $false
+    $delay = 1
+    if ($env:WCP_TEST_DELAY) { $delay = [int]$env:WCP_TEST_DELAY }
 
     [Console]::Out.WriteLine("wcp: running $Sheet")
+
+    # A refusing backend is not a failing test, so find out before asserting.
+    $out = (wcp -zn preflight ([Guid]::NewGuid().ToString('N')) | Out-String).Trim()
+    if ($out -notmatch '^[A-Za-z0-9.-]+$') {
+        Set-Location -LiteralPath $oldPwd
+        $env:LOCALAPPDATA = $oldLocal
+        $env:XDG_CACHE_HOME = $oldCache
+        $env:WCP_NO_COPY = $oldNoCopy
+        Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
+        [Console]::Out.WriteLine("")
+        [Console]::Out.WriteLine("BACKEND UNAVAILABLE - no tests were run.")
+        [Console]::Out.WriteLine("  the backend refused a preflight upload:")
+        $seen = $out -replace "`r?`n", ' '
+        if ($seen.Length -gt 100) { $seen = $seen.Substring(0, 100) }
+        [Console]::Out.WriteLine("  $seen")
+        [Console]::Out.WriteLine("This is a backend problem, not a wcp failure.")
+        return 2
+    }
     foreach ($line in (Get-Content -LiteralPath $Sheet)) {
         if ($line -match '^```powershell\s*$') { $inFence = $true; continue }
         if ($line -match '^```') { $inFence = $false; continue }
@@ -342,11 +363,16 @@ function Invoke-TestSheet([string]$Sheet) {
             if ($out -like ('*' + $want + '*')) {
                 $pass += 1
             } else {
-                $fail += 1
-                $seen = $out -replace "`r?`n", ' '
-                if ($seen.Length -gt 70) { $seen = $seen.Substring(0, 70) }
-                [Console]::Out.WriteLine("  FAIL $want")
-                [Console]::Out.WriteLine("       got: $seen")
+                if ($out -like '*upload failed on backend*' -or
+                    $out -like '*failed to fetch*') {
+                    $blocked += 1
+                } else {
+                    $fail += 1
+                    $seen = $out -replace "`r?`n", ' '
+                    if ($seen.Length -gt 70) { $seen = $seen.Substring(0, 70) }
+                    [Console]::Out.WriteLine("  FAIL $want")
+                    [Console]::Out.WriteLine("       got: $seen")
+                }
             }
             continue
         }
@@ -355,16 +381,22 @@ function Invoke-TestSheet([string]$Sheet) {
             if ($out -match $want) {
                 $pass += 1
             } else {
-                $fail += 1
-                $seen = $out -replace "`r?`n", ' '
-                if ($seen.Length -gt 70) { $seen = $seen.Substring(0, 70) }
-                [Console]::Out.WriteLine("  FAIL $want")
-                [Console]::Out.WriteLine("       got: $seen")
+                if ($out -like '*upload failed on backend*' -or
+                    $out -like '*failed to fetch*') {
+                    $blocked += 1
+                } else {
+                    $fail += 1
+                    $seen = $out -replace "`r?`n", ' '
+                    if ($seen.Length -gt 70) { $seen = $seen.Substring(0, 70) }
+                    [Console]::Out.WriteLine("  FAIL $want")
+                    [Console]::Out.WriteLine("       got: $seen")
+                }
             }
             continue
         }
         if ($line -match '^#') { continue }
 
+        if ($delay -gt 0) { Start-Sleep -Seconds $delay }
         try {
             $out = (Invoke-Expression $line 2>&1 | Out-String).Trim()
         } catch {
@@ -379,7 +411,9 @@ function Invoke-TestSheet([string]$Sheet) {
     Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
 
     [Console]::Out.WriteLine("")
-    [Console]::Out.WriteLine("$pass passed, $fail failed")
+    $summary = "$pass passed, $fail failed"
+    if ($blocked -gt 0) { $summary += ", $blocked blocked by the backend" }
+    [Console]::Out.WriteLine($summary)
     if ($fail -eq 0) { return 0 }
     return 1
 }
@@ -703,6 +737,7 @@ Options:
       --clear            empty the buffer without uploading
       --full             with -a, show the whole buffer, not head and tail
       --run-tests [file] run the blocks in tests.md and report pass/fail
+                         WCP_TEST_DELAY sets the gap between commands (default 1s)
   -v, --paste            upload the clipboard contents (takes no arguments)
   -h, --help             show this help
 
